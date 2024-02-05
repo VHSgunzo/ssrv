@@ -43,8 +43,8 @@ for ARCH in "${ARCHS[@]}"
         esac
         export GOARCH
 
-        go build -ldflags "-X main.VERSION=$VERSION -s -w" \
-            -trimpath -o "build/$ARCH/shellsrv"
+        go build -trimpath -o "build/$ARCH/shellsrv" \
+            -ldflags "-X main.VERSION=$VERSION -s -w -buildid="
 
         if [ "$WITH_UPX" == 1 ] && command -v upx &>/dev/null
             then upx --force-overwrite -9 --best \
