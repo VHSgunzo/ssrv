@@ -112,16 +112,6 @@ func getenv_or(key, fallback string) string {
 	return fallback
 }
 
-func is_flag_passed(name string) bool {
-	found := false
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == name {
-			found = true
-		}
-	})
-	return found
-}
-
 func srv_handle(conn net.Conn) {
 	disconnect := func(session *yamux.Session, remote string) {
 		session.Close()
@@ -274,15 +264,6 @@ func server(proto, socket string) {
 }
 
 func client(proto, socket string) int {
-	var skip_args = 1
-	skip_two_args := []string{"env", "socket"}
-	for _, arg := range skip_two_args {
-		if is_flag_passed(arg) {
-			skip_args += 2
-		}
-	}
-	args := os.Args[skip_args:]
-
 	conn, err := net.Dial(proto, socket)
 	if err != nil {
 		log.Fatalf("connection error: %v", err)
@@ -327,7 +308,7 @@ func client(proto, socket string) int {
 	if err != nil {
 		log.Fatalf("command channel open error: %v", err)
 	}
-	command := strings.Join(args, "\n") + "\r\n"
+	command := strings.Join(flag.Args(), "\n") + "\r\n"
 	_, err = command_channel.Write([]byte(command))
 	if err != nil {
 		log.Fatalf("failed to send command: %v", err)
