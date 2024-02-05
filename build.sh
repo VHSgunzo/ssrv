@@ -44,7 +44,7 @@ for ARCH in "${ARCHS[@]}"
         export GOARCH
 
         go build -ldflags "-X main.VERSION=$VERSION -s -w" \
-            -o "build/$ARCH/shellsrv"
+            -trimpath -o "build/$ARCH/shellsrv"
 
         if [ "$WITH_UPX" == 1 ] && command -v upx &>/dev/null
             then upx --force-overwrite -9 --best \
