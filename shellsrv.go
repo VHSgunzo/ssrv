@@ -91,11 +91,14 @@ func is_valid_proto(proto string) bool {
 }
 
 func get_shell() string {
-	bash := "/bin/bash"
 	shell := os.Getenv("SHELL")
 	if is_file_exists(shell) {
 		return shell
-	} else if is_file_exists(bash) {
+	} else if zsh, err := exec.LookPath("zsh"); err == nil {
+		return zsh
+	} else if fish, err := exec.LookPath("fish"); err == nil {
+		return fish
+	} else if bash, err := exec.LookPath("bash"); err == nil {
 		return bash
 	}
 	return "sh"
