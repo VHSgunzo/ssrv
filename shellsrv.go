@@ -118,13 +118,14 @@ func srv_handle(conn net.Conn) {
 		log.Printf("[%s] session error: %v", remote, err)
 		return
 	}
+	defer disconnect(session, remote)
 	log.Printf("[%s] [ NEW CONNECTION ]", remote)
 
 	done := make(chan struct{})
 
 	command_channel, err := session.Accept()
 	if err != nil {
-		log.Printf("[%s] control channel accept error: %v", remote, err)
+		log.Printf("[%s] command channel accept error: %v", remote, err)
 		return
 	}
 	cmd_reader := bufio.NewReader(command_channel)
@@ -147,29 +148,28 @@ func srv_handle(conn net.Conn) {
 		if err != nil {
 			log.Printf("[%s] error sending pty error: %v", remote, err)
 		}
-		disconnect(session, remote)
 		return
 	}
+	defer ptmx.Close()
 	cmd_pid := strconv.Itoa(exec_cmd.Process.Pid)
 	log.Printf("[%s] pid: %s", remote, cmd_pid)
 
 	control_channel, err := session.Accept()
 	if err != nil {
 		log.Printf("[%s] control channel accept error: %v", remote, err)
-		disconnect(session, remote)
 		return
 	}
 	go func() {
-		r := gob.NewDecoder(control_channel)
+		decoder := gob.NewDecoder(control_channel)
 		for {
 			var win struct {
 				Rows, Cols int
 			}
-			if err := r.Decode(&win); err != nil {
+			if err := decoder.Decode(&win); err != nil {
 				break
 			}
 			if err := set_term_size(ptmx, win.Rows, win.Cols); err != nil {
-				log.Printf("[%s] set_term_size error: %v", remote, err)
+				log.Printf("[%s] set term size error: %v", remote, err)
 				break
 			}
 			if err := syscall.Kill(exec_cmd.Process.Pid, syscall.SIGWINCH); err != nil {
@@ -183,7 +183,6 @@ func srv_handle(conn net.Conn) {
 	data_channel, err := session.Accept()
 	if err != nil {
 		log.Printf("[%s] data channel accept error: %v", remote, err)
-		disconnect(session, remote)
 		return
 	}
 	cp := func(dst io.Writer, src io.Reader) {
@@ -194,12 +193,10 @@ func srv_handle(conn net.Conn) {
 	go cp(ptmx, data_channel)
 
 	<-done
-	ptmx.Close()
 
 	state, err := exec_cmd.Process.Wait()
 	if err != nil {
 		log.Printf("[%s] error getting exit code: %v", remote, err)
-		disconnect(session, remote)
 		return
 	}
 	exit_code := strconv.Itoa(state.ExitCode())
@@ -209,8 +206,6 @@ func srv_handle(conn net.Conn) {
 	if err != nil {
 		log.Printf("[%s] error sending exit code: %v", remote, err)
 	}
-
-	disconnect(session, remote)
 }
 
 func server(proto, socket string) {
@@ -246,7 +241,13 @@ func server(proto, socket string) {
 	}
 }
 
-func client(proto, socket string, args []string) int {
+func client(proto, socket string) int {
+	var skip_args = 1
+	if is_flag_passed("socket") {
+		skip_args += 2
+	}
+	args := os.Args[skip_args:]
+
 	conn, err := net.Dial(proto, socket)
 	if err != nil {
 		log.Fatalf("connection error: %v", err)
@@ -276,7 +277,7 @@ func client(proto, socket string, args []string) int {
 	command := strings.Join(args, "\n") + "\r\n"
 	_, err = command_channel.Write([]byte(command))
 	if err != nil {
-		log.Fatalf("Failed to send command: %v", err)
+		log.Fatalf("failed to send command: %v", err)
 	}
 
 	control_channel, err := session.Open()
@@ -343,13 +344,7 @@ func main() {
 		if *is_srv {
 			server(proto, socket)
 		} else {
-			var args []string
-			if is_flag_passed("socket") {
-				args = os.Args[3:]
-			} else {
-				args = os.Args[1:]
-			}
-			os.Exit(client(proto, socket, args))
+			os.Exit(client(proto, socket))
 		}
 	} else {
 		log.Fatal("socket format is not recognized!")
