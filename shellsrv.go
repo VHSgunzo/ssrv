@@ -22,11 +22,7 @@ import (
 )
 
 var VERSION string = "HEAD"
-
-var UNIX_SOCKET = fmt.Sprintf(
-	"unix:%s/shellsrv.sock",
-	getenv_or("XDG_RUNTIME_DIR", "/tmp"),
-)
+var UNIX_SOCKET = "unix:@shellsrv"
 
 var is_srv = flag.Bool(
 	"srv", false,
@@ -103,13 +99,6 @@ func get_shell() string {
 		return bash
 	}
 	return "sh"
-}
-
-func getenv_or(key, fallback string) string {
-	if value, ok := os.LookupEnv(key); ok {
-		return value
-	}
-	return fallback
 }
 
 func srv_handle(conn net.Conn) {
@@ -251,7 +240,7 @@ func server(proto, socket string) {
 			log.Fatalln("unix socket:", err)
 		}
 	}
-	log.Printf("listening on %s %s", listen.Addr().String(), listen.Addr().Network())
+	log.Printf("listening on %s %s", listen.Addr().Network(), listen.Addr().String())
 
 	for {
 		conn, err := listen.Accept()
