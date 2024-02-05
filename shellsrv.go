@@ -21,12 +21,28 @@ import (
 	"golang.org/x/term"
 )
 
-var unix_socket = fmt.Sprintf("unix:%s/shellsrv.sock", getenv("XDG_RUNTIME_DIR", "/tmp"))
+var VERSION string = "HEAD"
 
-var is_srv = flag.Bool("srv", false, "Run as server")
+var UNIX_SOCKET = fmt.Sprintf(
+	"unix:%s/shellsrv.sock",
+	getenv_or("XDG_RUNTIME_DIR", "/tmp"),
+)
+
+var is_srv = flag.Bool(
+	"srv", false,
+	"Run as server",
+)
 var socket_addr = flag.String(
-	"socket", unix_socket,
+	"socket", UNIX_SOCKET,
 	"Socket address listen/connect (unix,tcp,tcp4,tcp6)",
+)
+var env_vars = flag.String(
+	"env", "TERM",
+	"Comma separated list of environment variables to pass to the host process.",
+)
+var is_version = flag.Bool(
+	"version", false,
+	"Show this program's version",
 )
 
 type win_size struct {
@@ -86,10 +102,10 @@ func get_shell() string {
 	} else if is_file_exists(bash) {
 		return bash
 	}
-	return "/bin/sh"
+	return "sh"
 }
 
-func getenv(key, fallback string) string {
+func getenv_or(key, fallback string) string {
 	if value, ok := os.LookupEnv(key); ok {
 		return value
 	}
@@ -123,6 +139,20 @@ func srv_handle(conn net.Conn) {
 
 	done := make(chan struct{})
 
+	envs_channel, err := session.Accept()
+	if err != nil {
+		log.Printf("[%s] environment channel accept error: %v", remote, err)
+		return
+	}
+	envs_reader := bufio.NewReader(envs_channel)
+	envs_str, err := envs_reader.ReadString('\r')
+	if err != nil {
+		log.Printf("[%s] error reading environment variables: %v", remote, err)
+		return
+	}
+	envs_str = envs_str[:len(envs_str)-1]
+	envs := strings.Split(envs_str, "\n")
+
 	command_channel, err := session.Accept()
 	if err != nil {
 		log.Printf("[%s] command channel accept error: %v", remote, err)
@@ -141,6 +171,8 @@ func srv_handle(conn net.Conn) {
 	cmd := strings.Split(cmd_str, "\n")
 	log.Printf("[%s] exec: %s", remote, cmd)
 	exec_cmd := exec.Command(cmd[0], cmd[1:]...)
+	exec_cmd.Env = os.Environ()
+	exec_cmd.Env = append(exec_cmd.Env, envs...)
 	ptmx, err := pty.Start(exec_cmd)
 	if err != nil {
 		log.Printf("[%s] pty error: %v", remote, err)
@@ -243,8 +275,11 @@ func server(proto, socket string) {
 
 func client(proto, socket string) int {
 	var skip_args = 1
-	if is_flag_passed("socket") {
-		skip_args += 2
+	skip_two_args := []string{"env", "socket"}
+	for _, arg := range skip_two_args {
+		if is_flag_passed(arg) {
+			skip_args += 2
+		}
 	}
 	args := os.Args[skip_args:]
 
@@ -257,6 +292,7 @@ func client(proto, socket string) int {
 	if err != nil {
 		log.Fatalf("session error: %v", err)
 	}
+	defer session.Close()
 
 	stdin := int(os.Stdin.Fd())
 	if !term.IsTerminal(stdin) {
@@ -269,6 +305,23 @@ func client(proto, socket string) int {
 	defer term.Restore(stdin, old_state)
 
 	done := make(chan struct{})
+
+	env_vars_pass := strings.Split(*env_vars, ",")
+	var envs string
+	for _, env := range env_vars_pass {
+		if value, ok := os.LookupEnv(env); ok {
+			envs += env + "=" + value + "\n"
+		}
+	}
+	envs += "\r\n"
+	envs_channel, err := session.Open()
+	if err != nil {
+		log.Fatalf("environment channel open error: %v", err)
+	}
+	_, err = envs_channel.Write([]byte(envs))
+	if err != nil {
+		log.Fatalf("failed to send environment variables: %v", err)
+	}
 
 	command_channel, err := session.Open()
 	if err != nil {
@@ -285,22 +338,22 @@ func client(proto, socket string) int {
 		log.Fatalf("control channel open error: %v", err)
 	}
 	go func() {
-		w := gob.NewEncoder(control_channel)
-		c := make(chan os.Signal, 1)
-		signal.Notify(c, syscall.SIGWINCH)
+		encoder := gob.NewEncoder(control_channel)
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGWINCH)
 		for {
 			cols, rows, err := term.GetSize(stdin)
 			if err != nil {
-				log.Printf("getsize error: %v", err)
+				log.Printf("get term size error: %v", err)
 				break
 			}
 			win := struct {
 				Rows, Cols int
 			}{Rows: rows, Cols: cols}
-			if err := w.Encode(win); err != nil {
+			if err := encoder.Encode(win); err != nil {
 				break
 			}
-			<-c
+			<-sig
 		}
 		done <- struct{}{}
 	}()
@@ -322,7 +375,7 @@ func client(proto, socket string) int {
 	if strings.Contains(exit_code_str, "pty error") {
 		log.Println(exit_code_str)
 	} else if err == nil {
-		exit_code, _ = strconv.Atoi(exit_code_str[:len(exit_code_str)-1])
+		exit_code, err = strconv.Atoi(exit_code_str[:len(exit_code_str)-1])
 		if err != nil {
 			log.Printf("failed to parse exit code: %v", err)
 		}
@@ -331,12 +384,17 @@ func client(proto, socket string) int {
 	}
 
 	<-done
-	session.Close()
 	return exit_code
 }
 
 func main() {
 	flag.Parse()
+
+	if *is_version {
+		fmt.Println(VERSION)
+		os.Exit(0)
+	}
+
 	address := strings.Split(*socket_addr, ":")
 	if len(address) > 1 && is_valid_proto(address[0]) {
 		proto := address[0]
