@@ -26,7 +26,7 @@ jobs:
       - name: Build
         run: >
           sudo bash -c 'apt update && apt install upx -y';
-          env WITH_UPX=1 CREATE_RELEASE_ARCHIVES=1 ./build.sh;
+          env WITH_UPX=1 CREATE_RELEASE_ARCHIVES=1 ./build.sh all;
 
       - name: Release
         uses: softprops/action-gh-release@v1
