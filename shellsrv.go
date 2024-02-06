@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,9 +23,33 @@ import (
 )
 
 var VERSION string = "HEAD"
-var UNIX_SOCKET = "unix:@shellsrv"
 
-// pty_blocklist contains the list of programs not working well with an allocated pty.
+const BINARY_NAME = "shellsrv"
+const UNIX_SOCKET = "unix:@shellsrv"
+
+const USAGE_PREAMBLE = `Server usage: %[1]s -server [-socket tcp:1337]
+Client usage: %[1]s [options] [ COMMAND [ arguments... ] ]
+
+If COMMAND is not passed, spawn a $SHELL on the server side.
+
+Accepted options:
+`
+
+const USAGE_FOOTER = `
+--
+
+Environment variables:
+    SSRV_ALLOC_PTY=1                Same as -pty argument
+    SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
+    SSRV_ENVS="MY_VAR,MY_VAR1"      Same as -env argument
+    SSRV_SOCKET="tcp:1337"          Same as -socket argument
+    SHELL="/bin/bash"               Assigns a default shell (on the server side)
+
+--
+
+If none of the pty arguments are passed in the client, a pseudo-terminal is allocated by default, unless it is 
+known that the command behaves incorrectly when attached to the pty or the client is not running in the terminal`
+
 var pty_blocklist = map[string]bool{
 	"gio":       true,
 	"podman":    true,
@@ -34,7 +59,7 @@ var pty_blocklist = map[string]bool{
 }
 
 var is_srv = flag.Bool(
-	"srv", false,
+	"server", false,
 	"Run as server",
 )
 var socket_addr = flag.String(
@@ -43,7 +68,7 @@ var socket_addr = flag.String(
 )
 var env_vars = flag.String(
 	"env", "TERM",
-	"Comma separated list of environment variables to pass to the host process.",
+	"Comma separated list of environment variables to pass to the server side process.",
 )
 var is_version = flag.Bool(
 	"version", false,
@@ -52,11 +77,11 @@ var is_version = flag.Bool(
 
 var is_pty = flag.Bool(
 	"pty", false,
-	"Force allocate a pseudo-terminal for the host process",
+	"Force allocate a pseudo-terminal for the server side process",
 )
 var is_no_pty = flag.Bool(
 	"no-pty", false,
-	"Do not allocate a pseudo-terminal for the host process",
+	"Do not allocate a pseudo-terminal for the server side process",
 )
 
 type win_size struct {
@@ -120,6 +145,44 @@ func get_shell() string {
 		return bash
 	}
 	return "sh"
+}
+
+func is_env_var_eq(var_name, var_value string) bool {
+	value, exists := os.LookupEnv(var_name)
+	return exists && value == var_value
+}
+
+func flag_parse() []string {
+	flag.Usage = func() {
+		fmt.Fprintf(os.Stderr, USAGE_PREAMBLE, os.Args[0])
+		flag.PrintDefaults()
+		fmt.Fprintln(os.Stderr, USAGE_FOOTER)
+		os.Exit(0)
+	}
+
+	flag.Parse()
+
+	if *is_version {
+		fmt.Println(VERSION)
+		os.Exit(0)
+	}
+
+	return flag.Args()
+}
+
+func ssrv_env_vars_parse() {
+	if is_env_var_eq("SSRV_ALLOC_PTY", "1") {
+		flag.Set("pty", "true")
+	}
+	if is_env_var_eq("SSRV_NO_ALLOC_PTY", "1") {
+		flag.Set("no-pty", "true")
+	}
+	if ssrv_socket, ok := os.LookupEnv("SSRV_SOCKET"); ok {
+		flag.Set("socket", ssrv_socket)
+	}
+	if ssrv_envs, ok := os.LookupEnv("SSRV_ENVS"); ok {
+		flag.Set("env", ssrv_envs)
+	}
 }
 
 func srv_handle(conn net.Conn) {
@@ -299,11 +362,11 @@ func server(proto, socket string) {
 	}
 }
 
-func client(proto, socket string) int {
-
-	exec_args := flag.Args()
-
-	is_alloc_pty := !pty_blocklist[exec_args[0]]
+func client(proto, socket string, exec_args []string) int {
+	is_alloc_pty := true
+	if len(exec_args) != 0 {
+		is_alloc_pty = !pty_blocklist[exec_args[0]]
+	}
 	if *is_pty {
 		is_alloc_pty = true
 	} else if *is_no_pty {
@@ -424,12 +487,15 @@ func client(proto, socket string) int {
 }
 
 func main() {
-	flag.Parse()
-
-	if *is_version {
-		fmt.Println(VERSION)
-		os.Exit(0)
+	var exec_args []string
+	self_basename := path.Base(os.Args[0])
+	if self_basename != BINARY_NAME {
+		exec_args = append([]string{self_basename}, os.Args[1:]...)
+	} else {
+		exec_args = flag_parse()
 	}
+
+	ssrv_env_vars_parse()
 
 	address := strings.Split(*socket_addr, ":")
 	if len(address) > 1 && is_valid_proto(address[0]) {
@@ -438,7 +504,7 @@ func main() {
 		if *is_srv {
 			server(proto, socket)
 		} else {
-			os.Exit(client(proto, socket))
+			os.Exit(client(proto, socket, exec_args))
 		}
 	} else {
 		log.Fatal("socket format is not recognized!")
