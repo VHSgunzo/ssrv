@@ -27,7 +27,8 @@ jobs:
         run: >
           sudo sh -c 'curl -LO https://github.com/upx/upx/releases/download/v4.2.2/upx-4.2.2-amd64_linux.tar.xz && \
                       tar -xvf upx-4.2.2-amd64_linux.tar.xz && \
-                      mv -f upx-4.2.2-amd64_linux/upx /bin/upx';
+                      mv -f upx-4.2.2-amd64_linux/upx /bin/upx && \
+                      chmod +x /bin/upx';
           env WITH_UPX=1 CREATE_RELEASE_ARCHIVES=1 ./build.sh all;
 
       - name: Release
