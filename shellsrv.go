@@ -24,6 +24,15 @@ import (
 var VERSION string = "HEAD"
 var UNIX_SOCKET = "unix:@shellsrv"
 
+// pty_blocklist contains the list of programs not working well with an allocated pty.
+var pty_blocklist = map[string]bool{
+	"gio":       true,
+	"podman":    true,
+	"kde-open":  true,
+	"kde-open5": true,
+	"xdg-open":  true,
+}
+
 var is_srv = flag.Bool(
 	"srv", false,
 	"Run as server",
@@ -39,6 +48,15 @@ var env_vars = flag.String(
 var is_version = flag.Bool(
 	"version", false,
 	"Show this program's version",
+)
+
+var is_pty = flag.Bool(
+	"pty", false,
+	"Force allocate a pseudo-terminal for the host process",
+)
+var is_no_pty = flag.Bool(
+	"no-pty", false,
+	"Do not allocate a pseudo-terminal for the host process",
 )
 
 type win_size struct {
@@ -134,6 +152,13 @@ func srv_handle(conn net.Conn) {
 	}
 	envs_str = envs_str[:len(envs_str)-1]
 	envs := strings.Split(envs_str, "\n")
+	last_env_num := len(envs) - 1
+
+	is_alloc_pty := false
+	if envs[last_env_num] == "is_alloc_pty=true" {
+		is_alloc_pty = true
+		envs = envs[:last_env_num]
+	}
 
 	command_channel, err := session.Accept()
 	if err != nil {
@@ -153,46 +178,59 @@ func srv_handle(conn net.Conn) {
 	cmd := strings.Split(cmd_str, "\n")
 	log.Printf("[%s] exec: %s", remote, cmd)
 	exec_cmd := exec.Command(cmd[0], cmd[1:]...)
+
 	exec_cmd.Env = os.Environ()
 	exec_cmd.Env = append(exec_cmd.Env, envs...)
-	ptmx, err := pty.Start(exec_cmd)
+
+	var cmd_ptmx *os.File
+	var cmd_stdout, cmd_stderr io.ReadCloser
+	if is_alloc_pty {
+		cmd_ptmx, err = pty.Start(exec_cmd)
+	} else {
+		cmd_stdout, _ = exec_cmd.StdoutPipe()
+		cmd_stderr, _ = exec_cmd.StderrPipe()
+		err = exec_cmd.Start()
+	}
 	if err != nil {
-		log.Printf("[%s] pty error: %v", remote, err)
-		_, err = command_channel.Write([]byte(fmt.Sprint("pty error: " + err.Error() + "\r\n")))
+		log.Printf("[%s] cmd error: %v", remote, err)
+		_, err = command_channel.Write([]byte(fmt.Sprint("cmd error: " + err.Error() + "\r\n")))
 		if err != nil {
-			log.Printf("[%s] error sending pty error: %v", remote, err)
+			log.Printf("[%s] failed to send cmd error: %v", remote, err)
 		}
 		return
 	}
-	defer ptmx.Close()
+	defer cmd_ptmx.Close()
+
 	cmd_pid := strconv.Itoa(exec_cmd.Process.Pid)
 	log.Printf("[%s] pid: %s", remote, cmd_pid)
 
-	control_channel, err := session.Accept()
-	if err != nil {
-		log.Printf("[%s] control channel accept error: %v", remote, err)
-		return
-	}
-	go func() {
-		decoder := gob.NewDecoder(control_channel)
-		for {
-			var win struct {
-				Rows, Cols int
-			}
-			if err := decoder.Decode(&win); err != nil {
-				break
-			}
-			if err := set_term_size(ptmx, win.Rows, win.Cols); err != nil {
-				log.Printf("[%s] set term size error: %v", remote, err)
-				break
-			}
-			if err := syscall.Kill(exec_cmd.Process.Pid, syscall.SIGWINCH); err != nil {
-				log.Printf("[%s] sigwinch error: %v", remote, err)
-				break
-			}
+	if is_alloc_pty {
+		control_channel, err := session.Accept()
+		if err != nil {
+			log.Printf("[%s] control channel accept error: %v", remote, err)
+			return
 		}
-		done <- struct{}{}
-	}()
+		go func() {
+			decoder := gob.NewDecoder(control_channel)
+			for {
+				var win struct {
+					Rows, Cols int
+				}
+				if err := decoder.Decode(&win); err != nil {
+					break
+				}
+				if err := set_term_size(cmd_ptmx, win.Rows, win.Cols); err != nil {
+					log.Printf("[%s] set term size error: %v", remote, err)
+					break
+				}
+				if err := syscall.Kill(exec_cmd.Process.Pid, syscall.SIGWINCH); err != nil {
+					log.Printf("[%s] sigwinch error: %v", remote, err)
+					break
+				}
+			}
+			done <- struct{}{}
+		}()
+	}
 
 	data_channel, err := session.Accept()
 	if err != nil {
@@ -203,8 +241,14 @@ func srv_handle(conn net.Conn) {
 		io.Copy(dst, src)
 		done <- struct{}{}
 	}
-	go cp(data_channel, ptmx)
-	go cp(ptmx, data_channel)
+
+	if is_alloc_pty {
+		go cp(data_channel, cmd_ptmx)
+		go cp(cmd_ptmx, data_channel)
+	} else {
+		go cp(data_channel, cmd_stdout)
+		go cp(data_channel, cmd_stderr)
+	}
 
 	<-done
 
@@ -256,6 +300,16 @@ func server(proto, socket string) {
 }
 
 func client(proto, socket string) int {
+
+	exec_args := flag.Args()
+
+	is_alloc_pty := !pty_blocklist[exec_args[0]]
+	if *is_pty {
+		is_alloc_pty = true
+	} else if *is_no_pty {
+		is_alloc_pty = false
+	}
+
 	conn, err := net.Dial(proto, socket)
 	if err != nil {
 		log.Fatalf("connection error: %v", err)
@@ -267,15 +321,19 @@ func client(proto, socket string) int {
 	}
 	defer session.Close()
 
+	var old_state *term.State
 	stdin := int(os.Stdin.Fd())
-	if !term.IsTerminal(stdin) {
-		log.Fatal("not on a terminal")
+	if term.IsTerminal(stdin) {
+		if is_alloc_pty {
+			old_state, err = term.MakeRaw(stdin)
+			if err != nil {
+				log.Fatalf("unable to make terminal raw: %v", err)
+			}
+			defer term.Restore(stdin, old_state)
+		}
+	} else {
+		is_alloc_pty = false
 	}
-	old_state, err := term.MakeRaw(stdin)
-	if err != nil {
-		log.Fatalf("unable to make terminal raw: %v", err)
-	}
-	defer term.Restore(stdin, old_state)
 
 	done := make(chan struct{})
 
@@ -285,6 +343,9 @@ func client(proto, socket string) int {
 		if value, ok := os.LookupEnv(env); ok {
 			envs += env + "=" + value + "\n"
 		}
+	}
+	if is_alloc_pty {
+		envs += "is_alloc_pty=true"
 	}
 	envs += "\r\n"
 	envs_channel, err := session.Open()
@@ -300,36 +361,38 @@ func client(proto, socket string) int {
 	if err != nil {
 		log.Fatalf("command channel open error: %v", err)
 	}
-	command := strings.Join(flag.Args(), "\n") + "\r\n"
+	command := strings.Join(exec_args, "\n") + "\r\n"
 	_, err = command_channel.Write([]byte(command))
 	if err != nil {
 		log.Fatalf("failed to send command: %v", err)
 	}
 
-	control_channel, err := session.Open()
-	if err != nil {
-		log.Fatalf("control channel open error: %v", err)
-	}
-	go func() {
-		encoder := gob.NewEncoder(control_channel)
-		sig := make(chan os.Signal, 1)
-		signal.Notify(sig, syscall.SIGWINCH)
-		for {
-			cols, rows, err := term.GetSize(stdin)
-			if err != nil {
-				log.Printf("get term size error: %v", err)
-				break
-			}
-			win := struct {
-				Rows, Cols int
-			}{Rows: rows, Cols: cols}
-			if err := encoder.Encode(win); err != nil {
-				break
-			}
-			<-sig
+	if is_alloc_pty {
+		control_channel, err := session.Open()
+		if err != nil {
+			log.Fatalf("control channel open error: %v", err)
 		}
-		done <- struct{}{}
-	}()
+		go func() {
+			encoder := gob.NewEncoder(control_channel)
+			sig := make(chan os.Signal, 1)
+			signal.Notify(sig, syscall.SIGWINCH)
+			for {
+				cols, rows, err := term.GetSize(stdin)
+				if err != nil {
+					log.Printf("get term size error: %v", err)
+					break
+				}
+				win := struct {
+					Rows, Cols int
+				}{Rows: rows, Cols: cols}
+				if err := encoder.Encode(win); err != nil {
+					break
+				}
+				<-sig
+			}
+			done <- struct{}{}
+		}()
+	}
 
 	data_channel, err := session.Open()
 	if err != nil {
@@ -345,7 +408,7 @@ func client(proto, socket string) int {
 	var exit_code = 1
 	exit_reader := bufio.NewReader(command_channel)
 	exit_code_str, err := exit_reader.ReadString('\r')
-	if strings.Contains(exit_code_str, "pty error") {
+	if strings.Contains(exit_code_str, "cmd error:") {
 		log.Println(exit_code_str)
 	} else if err == nil {
 		exit_code, err = strconv.Atoi(exit_code_str[:len(exit_code_str)-1])
