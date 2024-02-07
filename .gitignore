@@ -3,3 +3,8 @@ shellsrv-upx
 build
 vendor
 *.tar.zst
+tls/shellsrv
+tls/shellsrv-upx
+tls/vendor
+tls/build
+tls/*.tar.zst

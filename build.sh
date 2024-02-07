@@ -6,7 +6,7 @@ set -o pipefail
 # ARCHS=(source i386 x86_64 armv7 aarch64)
 # CREATE_RELEASE_ARCHIVES=1
 
-SRC_DIR="$(dirname "$(realpath "$BASH_SOURCE")")"
+SRC_DIR="$(dirname "$BASH_SOURCE")"
 
 if [ ! -n "$ARCHS" ]
     then
@@ -21,6 +21,8 @@ GIT_VERSION="$(git describe --long --tags 2>/dev/null|sed 's/^v//;s/\([^-]*-g\)/
 [ -n "$GIT_VERSION" ] && \
 VERSION="$GIT_VERSION"||\
 VERSION="${VERSION:-HEAD}"
+[ "$(basename "$(realpath "$SRC_DIR")")" == 'tls' ] && \
+    VERSION="${VERSION}-tls"
 
 cd "$SRC_DIR"
 
