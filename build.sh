@@ -35,7 +35,7 @@ for ARCH in "${ARCHS[@]}"
                 git clean -fdx -e build
                 go mod vendor
                 tar -I 'zstd -T0 --ultra -22 --progress' --exclude build -cf \
-                "$SRC_DIR/shellsrv-src-${VERSION}.tar.zst" -C "$SRC_DIR" .
+                "$SRC_DIR/shellsrv-src-v${VERSION}.tar.zst" -C "$SRC_DIR" .
                 continue ;;
             i386|i686) GOARCH='386' ;;
             x86_64) GOARCH='amd64' ;;
@@ -62,6 +62,6 @@ for ARCH in "${ARCHS[@]}"
             then
                 echo "Archiving release ${ARCH}..."
                 tar -I 'zstd -T0 --ultra -22 --progress' -cf \
-                "$SRC_DIR/shellsrv-${ARCH}-${VERSION}.tar.zst" -C "build/$ARCH" .
+                "$SRC_DIR/shellsrv-${ARCH}-v${VERSION}.tar.zst" -C "build/$ARCH" .
         fi
 done
