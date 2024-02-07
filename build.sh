@@ -52,8 +52,10 @@ for ARCH in "${ARCHS[@]}"
         if [ "$WITH_UPX" == 1 ] && command -v upx &>/dev/null
             then
                 echo "UPXing ${ARCH}..."
+                upxdir="build/$ARCH/upx"
+                mkdir -p "$upxdir"
                 upx --force-overwrite -9 --best \
-                "build/$ARCH/shellsrv" -o "build/$ARCH/shellsrv-upx"
+                "build/$ARCH/shellsrv" -o "$upxdir/shellsrv"
         fi
 
         if [ "$CREATE_RELEASE_ARCHIVES" == 1 ]
