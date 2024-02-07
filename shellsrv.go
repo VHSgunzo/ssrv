@@ -50,6 +50,7 @@ Environment variables:
 If none of the pty arguments are passed in the client, a pseudo-terminal is allocated by default, unless it is 
 known that the command behaves incorrectly when attached to the pty or the client is not running in the terminal`
 
+var is_alloc_pty = true
 var pty_blocklist = map[string]bool{
 	"gio":       true,
 	"podman":    true,
@@ -180,8 +181,8 @@ func ssrv_env_vars_parse() {
 	if ssrv_socket, ok := os.LookupEnv("SSRV_SOCKET"); ok {
 		flag.Set("socket", ssrv_socket)
 	}
-	if ssrv_envs, ok := os.LookupEnv("SSRV_ENV"); ok {
-		flag.Set("env", ssrv_envs)
+	if ssrv_env, ok := os.LookupEnv("SSRV_ENV"); ok {
+		flag.Set("env", ssrv_env)
 	}
 }
 
@@ -217,7 +218,6 @@ func srv_handle(conn net.Conn) {
 	envs := strings.Split(envs_str, "\n")
 	last_env_num := len(envs) - 1
 
-	is_alloc_pty := true
 	if envs[last_env_num] == "is_alloc_pty := false" {
 		is_alloc_pty = false
 		envs = envs[:last_env_num]
@@ -363,7 +363,6 @@ func server(proto, socket string) {
 }
 
 func client(proto, socket string, exec_args []string) int {
-	is_alloc_pty := true
 	if len(exec_args) != 0 {
 		is_alloc_pty = !pty_blocklist[exec_args[0]]
 	}
