@@ -41,7 +41,7 @@ const USAGE_FOOTER = `
 Environment variables:
     SSRV_ALLOC_PTY=1                Same as -pty argument
     SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
-    SSRV_ENVS="MY_VAR,MY_VAR1"      Same as -env argument
+    SSRV_ENV="MY_VAR,MY_VAR1"      Same as -env argument
     SSRV_SOCKET="tcp:1337"          Same as -socket argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
@@ -180,7 +180,7 @@ func ssrv_env_vars_parse() {
 	if ssrv_socket, ok := os.LookupEnv("SSRV_SOCKET"); ok {
 		flag.Set("socket", ssrv_socket)
 	}
-	if ssrv_envs, ok := os.LookupEnv("SSRV_ENVS"); ok {
+	if ssrv_envs, ok := os.LookupEnv("SSRV_ENV"); ok {
 		flag.Set("env", ssrv_envs)
 	}
 }
