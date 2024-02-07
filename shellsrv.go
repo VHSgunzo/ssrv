@@ -217,9 +217,9 @@ func srv_handle(conn net.Conn) {
 	envs := strings.Split(envs_str, "\n")
 	last_env_num := len(envs) - 1
 
-	is_alloc_pty := false
-	if envs[last_env_num] == "is_alloc_pty=true" {
-		is_alloc_pty = true
+	is_alloc_pty := true
+	if envs[last_env_num] == "is_alloc_pty := false" {
+		is_alloc_pty = false
 		envs = envs[:last_env_num]
 	}
 
@@ -407,8 +407,8 @@ func client(proto, socket string, exec_args []string) int {
 			envs += env + "=" + value + "\n"
 		}
 	}
-	if is_alloc_pty {
-		envs += "is_alloc_pty=true"
+	if !is_alloc_pty {
+		envs += "is_alloc_pty := false"
 	}
 	envs += "\r\n"
 	envs_channel, err := session.Open()
