@@ -48,7 +48,7 @@ Accepted options:
 Environment variables:
     SSRV_ALLOC_PTY=1                Same as -pty argument
     SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
-    SSRV_ENVS="MY_VAR,MY_VAR1"      Same as -env argument
+    SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
     SSRV_SOCKET="tcp:1337"          Same as -socket argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
