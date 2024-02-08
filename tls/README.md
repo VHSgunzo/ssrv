@@ -13,9 +13,12 @@ create a symlink to it somewhere in your `$PATH` and it'll always be executed th
 `shellsrv` is ideal for system administrators and developers who require a solution for executing commands remotely or locally with  listening on unix sockets. By default, the server and the client communicate via an abstract unix socket `@shellsrv`. Its configurability and support for multiple concurrent sessions make it suitable for complex network operations and management tasks.
 
 ## To get started:
-* **Install the latest revision**
+* **Build the latest revision**
 ```
-go install github.com/VHSgunzo/shellsrv@latest
+git clone https://github.com/VHSgunzo/shellsrv.git
+cd shellsrv/tls
+./build.sh
+./build/$(uname -m)/shellsrv -h
 ```
 * Or take an already precompiled binary file from the [releases](https://github.com/VHSgunzo/shellsrv/releases)
 
