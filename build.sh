@@ -29,15 +29,14 @@ cd "$SRC_DIR"
 export CGO_ENABLED=0
 for ARCH in "${ARCHS[@]}"
     do
-        mkdir -p "build/$ARCH"
-
         case "$ARCH" in
             source)
                 echo "Create archive with source code..."
                 git clean -fdx -e build
                 go mod vendor
-                tar -I 'zstd -T0 --ultra -22 --progress' --exclude build -cf \
-                "$SRC_DIR/shellsrv-src-v${VERSION}.tar.zst" -C "$SRC_DIR" .
+                tar -I 'zstd -T0 --ultra -22 --progress' --exclude build -l \
+                --exclude tls --exclude .git --exclude .github --exclude .gitignore \
+                -cf "$SRC_DIR/shellsrv-src-v${VERSION}.tar.zst" -C "$SRC_DIR" .
                 continue ;;
             i386|i686) GOARCH='386' ;;
             x86_64) GOARCH='amd64' ;;
@@ -48,6 +47,7 @@ for ARCH in "${ARCHS[@]}"
         export GOARCH
 
         echo "Build for ${ARCH}..."
+        mkdir -p "build/$ARCH"
         go build -trimpath -o "build/$ARCH/shellsrv" \
             -ldflags "-X main.VERSION=$VERSION -s -w -buildid="
 

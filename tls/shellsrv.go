@@ -28,7 +28,7 @@ var VERSION string = "HEAD"
 const BINARY_NAME = "shellsrv"
 const UNIX_SOCKET = "unix:@shellsrv"
 
-const USAGE_PREAMBLE = `Server usage: %[1]s -server [-tls-key key.pem] [-tls-key cert.pem] [-socket tcp:1337]
+const USAGE_PREAMBLE = `Server usage: %[1]s -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337]
 Client usage: %[1]s -tls [options] [ COMMAND [ arguments... ] ]
 
 If COMMAND is not passed, spawn a $SHELL on the server side.

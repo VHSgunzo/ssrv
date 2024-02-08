@@ -23,7 +23,7 @@ go install github.com/VHSgunzo/shellsrv@latest
 ## **Usage**:
 ```
 ┌──[user@linux]─[~] - Server:
-└──╼ $ shellsrv -server [-tls-key key.pem] [-tls-key cert.pem] [-socket tcp:1337]
+└──╼ $ shellsrv -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337]
 ┌──[user@linux]─[~] - Client:
 └──╼ $ shellsrv -tls [options] [ COMMAND [ arguments... ] ]
 
