@@ -15,7 +15,7 @@ if [ ! -n "$ARCHS" ]
         ARCHS="$(uname -m)"
 fi
 [ "$ARCHS" == 'all' ] && \
-ARCHS=(source i386 x86_64 armv7 aarch64)
+ARCHS=(source i386 x86_64 armv7 aarch64 arm64)
 
 GIT_VERSION="$(git describe --long --tags 2>/dev/null|sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g')"
 [ -n "$GIT_VERSION" ] && \
@@ -42,6 +42,7 @@ for ARCH in "${ARCHS[@]}"
             x86_64) GOARCH='amd64' ;;
             armv7) GOARCH='arm' ;;
             aarch64) GOARCH='arm64' ;;
+            arm64) export GOOS='darwin' ; GOARCH='arm64' ;;
             *) GOARCH="$ARCH" ;;
         esac
         export GOARCH

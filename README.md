@@ -30,10 +30,14 @@ go install github.com/VHSgunzo/shellsrv@latest
 If COMMAND is not passed, spawn a $SHELL on the server side.
 
 Accepted options:
+    -cpids-dir string
+        A directory on the server side for storing a list of client PIDs. (default "/tmp/ssrv$EUID")
     -env string
         Comma separated list of environment variables to pass to the server side process. (default "TERM")
     -no-pty
         Do not allocate a pseudo-terminal for the server side process
+    -nosep-cpids
+        Don't create a separate dir for the server socket to store the list of client PIDs.
     -pty
         Force allocate a pseudo-terminal for the server side process
     -server
@@ -50,6 +54,8 @@ Environment variables:
     SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
     SSRV_SOCKET="tcp:1337"          Same as -socket argument
+    SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
+    SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --

@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/creack/pty"
@@ -47,11 +48,13 @@ Environment variables:
     SSRV_CLIENT_TLS=1               Same as -tls argument
     SSRV_TLS_KEY="/path/key.pem"    Same as -tls-key argument
     SSRV_TLS_CERT="/path/cert.pem"  Same as -tls-cert argument
+    SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
+    SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
 
-If none of the pty arguments are passed in the client, a pseudo-terminal is allocated by default, unless it is 
+If none of the pty arguments are passed in the client, a pseudo-terminal is allocated by default, unless it is
 known that the command behaves incorrectly when attached to the pty or the client is not running in the terminal`
 
 var is_alloc_pty = true
@@ -99,6 +102,14 @@ var tls_key = flag.String(
 	"tls-key", "key.pem",
 	"TLS key file for server",
 )
+var cpids_dir = flag.String(
+	"cpids-dir", fmt.Sprint("/tmp/ssrv", syscall.Geteuid()),
+	"A directory on the server side for storing a list of client PIDs.",
+)
+var nosep_cpids = flag.Bool(
+	"nosep-cpids", false,
+	"Don't create a separate dir for the server socket to store the list of client PIDs.",
+)
 
 type win_size struct {
 	ws_row    uint16
@@ -131,6 +142,32 @@ func get_socket(addr []string) string {
 		socket = ":" + addr[1]
 	}
 	return socket
+}
+
+func touch_file(path string) error {
+	_, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		file, err := os.Create(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+	} else {
+		currentTime := time.Now().Local()
+		err = os.Chtimes(path, currentTime, currentTime)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func is_dir_exists(dir string) bool {
+	info, err := os.Stat(dir)
+	if os.IsNotExist(err) {
+		return false
+	}
+	return info.IsDir()
 }
 
 func is_file_exists(filename string) bool {
@@ -210,9 +247,15 @@ func ssrv_env_vars_parse() {
 		is_file_exists(tls_cert) {
 		flag.Set("tls-cert", tls_cert)
 	}
+	if ssrv_cpids_dir, ok := os.LookupEnv("SSRV_CPIDS_DIR"); ok {
+		flag.Set("cpids-dir", ssrv_cpids_dir)
+	}
+	if is_env_var_eq("SSRV_NOSEP_CPIDS", "1") {
+		flag.Set("nosep-cpids", "true")
+	}
 }
 
-func srv_handle(conn net.Conn) {
+func srv_handle(conn net.Conn, self_cpids_dir string) {
 	disconnect := func(session *yamux.Session, remote string) {
 		session.Close()
 		log.Printf("[%s] [  DISCONNECTED  ]", remote)
@@ -293,6 +336,19 @@ func srv_handle(conn net.Conn) {
 	cmd_pid := strconv.Itoa(exec_cmd.Process.Pid)
 	log.Printf("[%s] pid: %s", remote, cmd_pid)
 
+	cpid := fmt.Sprint(self_cpids_dir, "/", cmd_pid)
+	if is_dir_exists(self_cpids_dir) {
+		proc_pid := fmt.Sprint("/proc/", cmd_pid)
+		if is_dir_exists(proc_pid) {
+			if err := os.Symlink(proc_pid, cpid); err != nil {
+				log.Printf("[%s] symlink error: %v", remote, err)
+				return
+			}
+		} else {
+			touch_file(cpid)
+		}
+	}
+
 	if is_alloc_pty {
 		control_channel, err := session.Accept()
 		if err != nil {
@@ -353,20 +409,12 @@ func srv_handle(conn net.Conn) {
 	if err != nil {
 		log.Printf("[%s] error sending exit code: %v", remote, err)
 	}
+
+	os.Remove(cpid)
 }
 
 func server(proto, socket string) {
 	var err error
-
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sig
-		if proto == "unix" && is_file_exists(socket) {
-			os.Remove(socket)
-		}
-		os.Exit(1)
-	}()
 
 	var listener net.Listener
 	if is_file_exists(*tls_cert) && is_file_exists(*tls_key) {
@@ -397,7 +445,34 @@ func server(proto, socket string) {
 			log.Fatalln("unix socket:", err)
 		}
 	}
-	log.Printf("listening on %s %s", listener.Addr().Network(), listener.Addr().String())
+	listener_addr := listener.Addr().String()
+	log.Printf("listening on %s %s", listener.Addr().Network(), listener_addr)
+
+	var self_cpids_dir string
+	if *nosep_cpids {
+		self_cpids_dir = *cpids_dir
+	} else {
+		listener_addr = strings.TrimLeft(listener_addr, "/")
+		listener_addr = strings.Replace(listener_addr, "/", "-", -1)
+		self_cpids_dir = fmt.Sprint(*cpids_dir, "/", listener_addr)
+	}
+
+	err = os.MkdirAll(self_cpids_dir, 0700)
+	if err != nil {
+		fmt.Println("creating directory error:", err)
+	}
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sig
+		if proto == "unix" && is_file_exists(socket) {
+			os.Remove(socket)
+		}
+		os.RemoveAll(self_cpids_dir)
+		os.Remove(*cpids_dir)
+		os.Exit(1)
+	}()
 
 	for {
 		conn, err := listener.Accept()
@@ -405,7 +480,7 @@ func server(proto, socket string) {
 			log.Printf("[%s] accept error: %v", conn.RemoteAddr().String(), err)
 			continue
 		}
-		go srv_handle(conn)
+		go srv_handle(conn, self_cpids_dir)
 	}
 }
 

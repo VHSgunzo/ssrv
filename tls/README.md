@@ -33,10 +33,14 @@ cd shellsrv/tls
 If COMMAND is not passed, spawn a $SHELL on the server side.
 
 Accepted options:
+    -cpids-dir string
+        A directory on the server side for storing a list of client PIDs. (default "/tmp/ssrv$EUID")
     -env string
         Comma separated list of environment variables to pass to the server side process. (default "TERM")
     -no-pty
         Do not allocate a pseudo-terminal for the server side process
+    -nosep-cpids
+        Don't create a separate dir for the server socket to store the list of client PIDs.
     -pty
         Force allocate a pseudo-terminal for the server side process
     -server
@@ -62,6 +66,8 @@ Environment variables:
     SSRV_CLIENT_TLS=1               Same as -tls argument
     SSRV_TLS_KEY="/path/key.pem"    Same as -tls-key argument
     SSRV_TLS_CERT="/path/cert.pem"  Same as -tls-cert argument
+    SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
+    SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
