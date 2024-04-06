@@ -41,6 +41,8 @@ Accepted options:
         Do not allocate a pseudo-terminal for the server side process
     -nosep-cpids
         Don't create a separate dir for the server socket to store the list of client PIDs.
+    -pid-file string
+        The file for storing the server's PID.
     -pty
         Force allocate a pseudo-terminal for the server side process
     -server
@@ -68,6 +70,7 @@ Environment variables:
     SSRV_TLS_CERT="/path/cert.pem"  Same as -tls-cert argument
     SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
+    SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --

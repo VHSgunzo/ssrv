@@ -46,6 +46,7 @@ Environment variables:
     SSRV_SOCKET="tcp:1337"          Same as -socket argument
     SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
+    SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
@@ -93,6 +94,10 @@ var cpids_dir = flag.String(
 var nosep_cpids = flag.Bool(
 	"nosep-cpids", false,
 	"Don't create a separate dir for the server socket to store the list of client PIDs.",
+)
+var pid_file = flag.String(
+	"pid-file", "",
+	"The file for storing the server's PID.",
 )
 
 type win_size struct {
@@ -225,6 +230,9 @@ func ssrv_env_vars_parse() {
 	}
 	if is_env_var_eq("SSRV_NOSEP_CPIDS", "1") {
 		flag.Set("nosep-cpids", "true")
+	}
+	if ssrv_pid_file, ok := os.LookupEnv("SSRV_PID_FILE"); ok {
+		flag.Set("pid-file", ssrv_pid_file)
 	}
 }
 
@@ -387,6 +395,13 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 }
 
 func server(proto, socket string) {
+	ssrv_pid := fmt.Sprintf("%d", os.Getpid())
+	if *pid_file != "" {
+		err := os.WriteFile(*pid_file, []byte(ssrv_pid), 0644)
+		if err != nil {
+			log.Fatalf("error writing PID file: %v\n", err)
+		}
+	}
 
 	listener, err := net.Listen(proto, socket)
 	if err != nil {
@@ -421,6 +436,9 @@ func server(proto, socket string) {
 		<-sig
 		if proto == "unix" && is_file_exists(socket) {
 			os.Remove(socket)
+		}
+		if is_file_exists(*pid_file) {
+			os.Remove(*pid_file)
 		}
 		os.RemoveAll(self_cpids_dir)
 		os.Remove(*cpids_dir)
