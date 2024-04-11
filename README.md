@@ -9,6 +9,7 @@ Key features include:
 - **Command Execution**: When no command is passed, the default behavior is to spawn a shell on the server side, offering full shell functionality to the client. The remote command exit code is also returned to the client.
 - **Shims for the server side binaries**: If there's a process that you always want to execute on the server side system, you can
 create a symlink to it somewhere in your `$PATH` and it'll always be executed through `shellsrv`.
+- **Stdin Pipe**: Sends data to the command's standard input using a pipe.
 
 `shellsrv` is ideal for system administrators and developers who require a solution for executing commands remotely or locally with  listening on unix sockets. By default, the server and the client communicate via an abstract unix socket `@shellsrv`. Its configurability and support for multiple concurrent sessions make it suitable for complex network operations and management tasks.
 
@@ -81,6 +82,26 @@ $ ln -s /usr/local/bin/shellsrv /usr/local/bin/flatpak
 # Now flatpak will always be executed on the server side
 $ flatpak --version
 Flatpak 1.12.7
+```
+
+Example of file transfer to server:
+
+```
+# one file:
+shellsrv sh -c 'cat>/server/path/some_file.tar.zst' </client/path/some_file.tar.zst
+
+# directory with zstd compression:
+tar -I 'zstd -T0 -1' -c /client/path/some_dir|shellsrv tar --zstd -xf - -C /server/path/some_dir
+```
+
+Example of file transfer from server:
+
+```
+# one file:
+shellsrv cat /server/path/some_file.tar.zst > /client/path/some_file.tar.zst
+
+# directory with zstd compression:
+shellsrv sh -c "tar -I 'zstd -T0 -1' -c /server/path/some_dir 2>/dev/null"|tar --zstd -xf - -C /client/path/some_dir
 ```
 
 **Note:** you will want to store the symlink in a location visible only to the container, to avoid an infinite loop. If you are using toolbox/distrobox, this means anywhere outside your home directory. I recommend `/usr/local/bin`.

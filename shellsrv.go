@@ -268,9 +268,18 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	envs := strings.Split(envs_str, "\n")
 	last_env_num := len(envs) - 1
 
+	var stdin_channel net.Conn
 	if envs[last_env_num] == "is_alloc_pty := false" {
 		is_alloc_pty = false
 		envs = envs[:last_env_num]
+
+		stdin_channel, err = session.Accept()
+		if err != nil {
+			log.Printf("[%s] stdin channel accept error: %v", remote, err)
+			return
+		}
+	} else {
+		is_alloc_pty = true
 	}
 
 	command_channel, err := session.Accept()
@@ -300,6 +309,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	if is_alloc_pty {
 		cmd_ptmx, err = pty.Start(exec_cmd)
 	} else {
+		exec_cmd.Stdin = stdin_channel
 		cmd_stdout, _ = exec_cmd.StdoutPipe()
 		cmd_stderr, _ = exec_cmd.StderrPipe()
 		err = exec_cmd.Start()
@@ -407,6 +417,7 @@ func server(proto, socket string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	if proto == "unix" && is_file_exists(socket) {
 		err = os.Chmod(socket, 0700)
 		if err != nil {
@@ -476,9 +487,27 @@ func client(proto, socket string, exec_args []string) int {
 	}
 	defer session.Close()
 
+	is_stdin_piped := false
+	stdin_stat, err := os.Stdin.Stat()
+	if err != nil {
+		log.Fatalf("unable to stat stdin: %v", err)
+	}
+	if (stdin_stat.Mode() & os.ModeCharDevice) == 0 {
+		is_stdin_piped = true
+	}
+
+	stdout_stat, err := os.Stdout.Stat()
+	if err != nil {
+		log.Fatalf("unable to stat stdout: %v", err)
+	}
+	is_stdout_piped := false
+	if (stdout_stat.Mode() & os.ModeCharDevice) == 0 {
+		is_stdout_piped = true
+	}
+
 	var old_state *term.State
 	stdin := int(os.Stdin.Fd())
-	if term.IsTerminal(stdin) {
+	if term.IsTerminal(stdin) && !is_stdout_piped && !is_stdin_piped {
 		if is_alloc_pty {
 			old_state, err = term.MakeRaw(stdin)
 			if err != nil {
@@ -510,6 +539,14 @@ func client(proto, socket string, exec_args []string) int {
 	_, err = envs_channel.Write([]byte(envs))
 	if err != nil {
 		log.Fatalf("failed to send environment variables: %v", err)
+	}
+
+	var stdin_channel net.Conn
+	if !is_alloc_pty {
+		stdin_channel, err = session.Open()
+		if err != nil {
+			log.Fatalf("stdin channel open error: %v", err)
+		}
 	}
 
 	command_channel, err := session.Open()
@@ -557,7 +594,28 @@ func client(proto, socket string, exec_args []string) int {
 		io.Copy(dst, src)
 		done <- struct{}{}
 	}
-	go cp(data_channel, os.Stdin)
+	if is_stdin_piped {
+		go func() {
+			reader := bufio.NewReader(os.Stdin)
+			buffer := make([]byte, 1024)
+			for {
+				stdin_seek, err := reader.Read(buffer)
+				if err != nil && err != io.EOF {
+					log.Fatalf("unable to read stdin: %v", err)
+				}
+				if err == io.EOF {
+					break
+				}
+				_, err = stdin_channel.Write(buffer[:stdin_seek])
+				if err != nil {
+					log.Fatalf("failed to send stdin data: %v", err)
+				}
+			}
+			stdin_channel.Close()
+		}()
+	} else {
+		go cp(data_channel, os.Stdin)
+	}
 	go cp(os.Stdout, data_channel)
 
 	var exit_code = 1
