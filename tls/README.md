@@ -95,6 +95,7 @@ $ ln -s /usr/local/bin/shellsrv /usr/local/bin/flatpak
 $ flatpak --version
 Flatpak 1.12.7
 ```
+**Note:** you will want to store the symlink in a location visible only to the container, to avoid an infinite loop. If you are using toolbox/distrobox, this means anywhere outside your home directory. I recommend `/usr/local/bin`.
 
 Example of file transfer to server:
 
@@ -113,7 +114,7 @@ Example of file transfer from server:
 shellsrv cat /server/path/some_file.tar.zst > /client/path/some_file.tar.zst
 
 # directory with zstd compression:
-shellsrv sh -c "tar -I 'zstd -T0 -1' -c /server/path/some_dir 2>/dev/null"|tar --zstd -xf - -C /client/path/some_dir
+shellsrv tar -I 'zstd -T0 -1' -c /server/path/some_dir|tar --zstd -xf - -C /client/path/some_dir
+# or dir to archive:
+shellsrv tar -I 'zstd -T0 -1' -c /server/path/some_dir > /client/path/some_dir.tar.zst
 ```
-
-**Note:** you will want to store the symlink in a location visible only to the container, to avoid an infinite loop. If you are using toolbox/distrobox, this means anywhere outside your home directory. I recommend `/usr/local/bin`.
