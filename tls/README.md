@@ -26,10 +26,12 @@ cd shellsrv/tls
 
 ## **Usage**:
 ```
+┌──[user@linux]─[~] - generate key.pem and cert.pem:
+└──╼ $ openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout key.pem -out cert.pem
 ┌──[user@linux]─[~] - Server:
 └──╼ $ shellsrv -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337]
 ┌──[user@linux]─[~] - Client:
-└──╼ $ shellsrv -tls [options] [ COMMAND [ arguments... ] ]
+└──╼ $ shellsrv [-tls-cert cert.pem] [options] [ COMMAND [ arguments... ] ]
 
 If COMMAND is not passed, spawn a $SHELL on the server side.
 
@@ -50,10 +52,8 @@ Accepted options:
         Run as server
     -socket string
         Socket address listen/connect (unix,tcp,tcp4,tcp6) (default "unix:@shellsrv")
-    -tls
-        Use TLS encryption for connect to server
     -tls-cert string
-        TLS cert file for server (default "cert.pem")
+        TLS cert file for server and client (default "cert.pem")
     -tls-key string
         TLS key file for server (default "key.pem")
     -version

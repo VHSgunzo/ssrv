@@ -244,7 +244,9 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		log.Printf("[%s] [  DISCONNECTED  ]", remote)
 	}
 
+	defer conn.Close()
 	remote := conn.RemoteAddr().String()
+
 	session, err := yamux.Server(conn, nil)
 	if err != nil {
 		log.Printf("[%s] session error: %v", remote, err)
@@ -489,12 +491,18 @@ func client(proto, socket string, exec_args []string) int {
 	if err != nil {
 		log.Fatalf("connection error: %v", err)
 	}
+	defer conn.Close()
 
 	session, err := yamux.Client(conn, nil)
 	if err != nil {
 		log.Fatalf("session error: %v", err)
 	}
 	defer session.Close()
+
+	_, err = session.Ping()
+	if err != nil {
+		log.Fatalf("ping error: %v", err)
+	}
 
 	stdin := int(os.Stdin.Fd())
 	is_stdin_term := false

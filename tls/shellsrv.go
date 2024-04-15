@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/gob"
 	"flag"
@@ -22,6 +23,7 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/hashicorp/yamux"
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/term"
 )
 
@@ -31,7 +33,7 @@ const BINARY_NAME = "shellsrv"
 const UNIX_SOCKET = "unix:@shellsrv"
 
 const USAGE_PREAMBLE = `Server usage: %[1]s -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337]
-Client usage: %[1]s -tls [options] [ COMMAND [ arguments... ] ]
+Client usage: %[1]s [-tls-cert cert.pem] [options] [ COMMAND [ arguments... ] ]
 
 If COMMAND is not passed, spawn a $SHELL on the server side.
 
@@ -46,7 +48,6 @@ Environment variables:
     SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
     SSRV_SOCKET="tcp:1337"          Same as -socket argument
-    SSRV_CLIENT_TLS=1               Same as -tls argument
     SSRV_TLS_KEY="/path/key.pem"    Same as -tls-key argument
     SSRV_TLS_CERT="/path/cert.pem"  Same as -tls-cert argument
     SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
@@ -92,13 +93,9 @@ var is_no_pty = flag.Bool(
 	"no-pty", false,
 	"Do not allocate a pseudo-terminal for the server side process",
 )
-var is_tls = flag.Bool(
-	"tls", false,
-	"Use TLS encryption for connect to server",
-)
 var tls_cert = flag.String(
 	"tls-cert", "cert.pem",
-	"TLS cert file for server",
+	"TLS cert file for server and client",
 )
 var tls_key = flag.String(
 	"tls-key", "key.pem",
@@ -242,9 +239,6 @@ func ssrv_env_vars_parse() {
 	if ssrv_env, ok := os.LookupEnv("SSRV_ENV"); ok {
 		flag.Set("env", ssrv_env)
 	}
-	if is_env_var_eq("SSRV_CLIENT_TLS", "1") {
-		flag.Set("tls", "true")
-	}
 	if tls_key, ok := os.LookupEnv("SSRV_TLS_KEY"); ok &&
 		is_file_exists(tls_key) {
 		flag.Set("tls-key", tls_key)
@@ -264,6 +258,42 @@ func ssrv_env_vars_parse() {
 	}
 }
 
+func get_cert_sha256(cert string) ([]byte, error) {
+	cert_bytes, err := os.ReadFile(cert)
+	if err != nil {
+		return []byte(""), err
+	}
+	cert_str := string(cert_bytes)
+	cert_str = strings.Replace(cert_str, "-----BEGIN CERTIFICATE-----", "-----CERT_SHA256-----", -1)
+	cert_str = strings.Replace(cert_str, "-----END CERTIFICATE-----", "-----CERT_SHA256-----", -1)
+	cert_sha256 := sha256.Sum256([]byte(cert_str))
+	return cert_sha256[:], nil
+}
+
+func get_cert_hash(cert string) (string, error) {
+	cert_sha256, err := get_cert_sha256(cert)
+	if err != nil {
+		return "", err
+	}
+	hash_bytes, err := bcrypt.GenerateFromPassword(cert_sha256, bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash_bytes), nil
+}
+
+func verify_cert_hash(provided_cert_hash, cert string) (bool, error) {
+	cert_sha256, err := get_cert_sha256(cert)
+	if err != nil {
+		return false, err
+	}
+	err = bcrypt.CompareHashAndPassword([]byte(provided_cert_hash), cert_sha256)
+	if err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
 func srv_handle(conn net.Conn, self_cpids_dir string) {
 	var wg sync.WaitGroup
 	disconnect := func(session *yamux.Session, remote string) {
@@ -271,7 +301,26 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		log.Printf("[%s] [  DISCONNECTED  ]", remote)
 	}
 
+	defer conn.Close()
 	remote := conn.RemoteAddr().String()
+
+	if is_file_exists(*tls_cert) {
+		hash_buf := make([]byte, 60)
+		n, err := conn.Read(hash_buf)
+		if err != nil {
+			log.Printf("[%s] error reading cert hash: %v", remote, err)
+			return
+		}
+		provided_cert_hash := string(hash_buf[:n])
+		is_valid_cert_hash, err := verify_cert_hash(provided_cert_hash, *tls_cert)
+		if err != nil || !is_valid_cert_hash {
+			log.Printf("[%s] invalid cert!", remote)
+			conn.Write([]byte("error\r"))
+			return
+		}
+		conn.Write([]byte("\r"))
+	}
+
 	session, err := yamux.Server(conn, nil)
 	if err != nil {
 		log.Printf("[%s] session error: %v", remote, err)
@@ -457,7 +506,7 @@ func server(proto, socket string) {
 		}
 		tls_config := &tls.Config{
 			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS12,
+			MinVersion:         tls.VersionTLS13,
 			Certificates:       []tls.Certificate{cert},
 		}
 		listener, err = tls.Listen(proto, socket, tls_config)
@@ -534,28 +583,49 @@ func client(proto, socket string, exec_args []string) int {
 	}
 
 	var conn net.Conn
-	if *is_tls {
+	if is_file_exists(*tls_cert) {
 		tls_config := &tls.Config{
 			InsecureSkipVerify: true,
-			MinVersion:         tls.VersionTLS12,
+			MinVersion:         tls.VersionTLS13,
 		}
 		conn, err = tls.Dial(proto, socket, tls_config)
 		if err != nil {
 			log.Fatalf("TLS connection error: %v", err)
+		}
+		cert_hash, err := get_cert_hash(*tls_cert)
+		if err != nil {
+			log.Fatalf("failed to get cert hash: %v", err)
+		}
+		_, err = conn.Write([]byte(cert_hash))
+		if err != nil {
+			log.Fatalf("failed to send cert hash: %v", err)
+		}
+		status_reader := bufio.NewReader(conn)
+		status, err := status_reader.ReadString('\r')
+		if err != nil {
+			log.Fatalf("error reading hash status: %v", err)
+		}
+		if strings.Contains(status, "error") {
+			log.Fatalf("invalid cert!")
 		}
 	} else {
 		conn, err = net.Dial(proto, socket)
 		if err != nil {
 			log.Fatalf("connection error: %v", err)
 		}
-
 	}
+	defer conn.Close()
 
 	session, err := yamux.Client(conn, nil)
 	if err != nil {
 		log.Fatalf("session error: %v", err)
 	}
 	defer session.Close()
+
+	_, err = session.Ping()
+	if err != nil {
+		log.Fatalf("ping error: %v", err)
+	}
 
 	stdin := int(os.Stdin.Fd())
 	is_stdin_term := false
