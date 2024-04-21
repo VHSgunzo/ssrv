@@ -24,7 +24,7 @@ go install github.com/VHSgunzo/shellsrv@latest
 ## **Usage**:
 ```
 ┌──[user@linux]─[~] - Server:
-└──╼ $ shellsrv -server [-socket tcp:1337]
+└──╼ $ shellsrv -server [-socket tcp:1337] [-env all]
 ┌──[user@linux]─[~] - Client:
 └──╼ $ shellsrv [options] [ COMMAND [ arguments... ] ]
 
@@ -47,6 +47,8 @@ Accepted options:
         Run as server
     -socket string
         Socket address listen/connect (unix,tcp,tcp4,tcp6) (default "unix:@shellsrv")
+    -uenv string
+        Comma separated list of environment variables for unset on the server side process.
     -version
         Show this program's version
 
@@ -56,6 +58,7 @@ Environment variables:
     SSRV_ALLOC_PTY=1                Same as -pty argument
     SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
+    SSRV_UENV="MY_VAR,MY_VAR1"      Same as -uenv argument
     SSRV_SOCKET="tcp:1337"          Same as -socket argument
     SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument

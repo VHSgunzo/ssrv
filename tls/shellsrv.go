@@ -32,7 +32,7 @@ var VERSION string = "HEAD"
 const BINARY_NAME = "shellsrv"
 const UNIX_SOCKET = "unix:@shellsrv"
 
-const USAGE_PREAMBLE = `Server usage: %[1]s -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337]
+const USAGE_PREAMBLE = `Server usage: %[1]s -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337] [-env all]
 Client usage: %[1]s [-tls-cert cert.pem] [options] [ COMMAND [ arguments... ] ]
 
 If COMMAND is not passed, spawn a $SHELL on the server side.
@@ -47,6 +47,7 @@ Environment variables:
     SSRV_ALLOC_PTY=1                Same as -pty argument
     SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
+    SSRV_UENV="MY_VAR,MY_VAR1"      Same as -uenv argument
     SSRV_SOCKET="tcp:1337"          Same as -socket argument
     SSRV_TLS_KEY="/path/key.pem"    Same as -tls-key argument
     SSRV_TLS_CERT="/path/cert.pem"  Same as -tls-cert argument
@@ -79,7 +80,11 @@ var socket_addr = flag.String(
 )
 var env_vars = flag.String(
 	"env", "TERM",
-	"Comma separated list of environment variables to pass to the server side process.",
+	"Comma separated list of environment variables for pass to the server side process.",
+)
+var uenv_vars = flag.String(
+	"uenv", "",
+	"Comma separated list of environment variables for unset on the server side process.",
 )
 var is_version = flag.Bool(
 	"version", false,
@@ -239,6 +244,9 @@ func ssrv_env_vars_parse() {
 	if ssrv_env, ok := os.LookupEnv("SSRV_ENV"); ok {
 		flag.Set("env", ssrv_env)
 	}
+	if ssrv_uenv, ok := os.LookupEnv("SSRV_UENV"); ok {
+		flag.Set("uenv", ssrv_uenv)
+	}
 	if tls_key, ok := os.LookupEnv("SSRV_TLS_KEY"); ok &&
 		is_file_exists(tls_key) {
 		flag.Set("tls-key", tls_key)
@@ -389,7 +397,21 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	log.Printf("[%s] exec: %s", remote, cmd)
 	exec_cmd := exec.Command(cmd[0], cmd[1:]...)
 
-	exec_cmd.Env = os.Environ()
+	last_env_num -= 1
+	exec_cmd_envs := os.Environ()
+	if strings.HasPrefix(envs[last_env_num], "SSRV_UENV=") {
+		uenv_vars := strings.Replace(envs[last_env_num], "SSRV_UENV=", "", 1)
+		for _, uenv := range strings.Split(uenv_vars, ",") {
+			for num, env := range exec_cmd_envs {
+				pair := strings.SplitN(env, "=", 2)
+				if pair[0] == uenv {
+					exec_cmd_envs = append(exec_cmd_envs[:num], exec_cmd_envs[num+1:]...)
+				}
+			}
+		}
+		envs = envs[:last_env_num]
+	}
+	exec_cmd.Env = exec_cmd_envs
 	exec_cmd.Env = append(exec_cmd.Env, envs...)
 
 	var cmd_ptmx *os.File
@@ -559,6 +581,51 @@ func server(proto, socket string) {
 		os.Exit(1)
 	}()
 
+	if *env_vars == "all" {
+		for _, uenv := range strings.Split(*uenv_vars, ",") {
+			os.Unsetenv(uenv)
+		}
+		for _, env := range os.Environ() {
+			pair := strings.SplitN(env, "=", 2)
+			key := pair[0]
+			if strings.HasPrefix(key, "SSRV_") {
+				os.Unsetenv(key)
+			}
+		}
+	} else {
+		env_vars_pass := strings.Split(*env_vars, ",")
+		uenv_vars_pass := strings.Split(*uenv_vars, ",")
+		for _, env := range os.Environ() {
+			pair := strings.SplitN(env, "=", 2)
+			key := pair[0]
+			is_unset_env := true
+			env_vars_pass = append(env_vars_pass,
+				"PATH", "SHELL", "HOME", "MAIL", "USER", "LOGNAME",
+				"DISPLAY", "WAYLAND_DISPLAY", "LANG", "LANGUAGE",
+				"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
+				"XDG_SESSION_CLASS", "XDG_SESSION_TYPE",
+				"XDG_DATA_DIRS", "XDG_CONFIG_DIRS",
+				"XDG_SESSION_DESKTOP", "XDG_CURRENT_DESKTOP",
+				"KDE_FULL_SESSION", "KDE_SESSION_VERSION",
+			)
+			for _, env_pass := range env_vars_pass {
+				if key == env_pass {
+					is_unset_env = false
+					break
+				}
+			}
+			for _, uenv_pass := range uenv_vars_pass {
+				if key == uenv_pass {
+					is_unset_env = true
+					break
+				}
+			}
+			if is_unset_env {
+				os.Unsetenv(key)
+			}
+		}
+	}
+
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -658,11 +725,35 @@ func client(proto, socket string, exec_args []string) int {
 		is_alloc_pty = false
 	}
 
-	env_vars_pass := strings.Split(*env_vars, ",")
 	var envs string
-	for _, env := range env_vars_pass {
-		if value, ok := os.LookupEnv(env); ok {
-			envs += env + "=" + value + "\n"
+	if *env_vars == "all" {
+		uenv_vars_pass := strings.Split(*uenv_vars, ",")
+		for _, env := range os.Environ() {
+			pair := strings.SplitN(env, "=", 2)
+			key := pair[0]
+			is_add_env := true
+			for _, uenv_pass := range uenv_vars_pass {
+				if key == uenv_pass {
+					is_add_env = false
+					break
+				}
+			}
+			if is_add_env {
+				envs += env + "\n"
+			}
+		}
+	} else {
+		if *env_vars != "TERM" {
+			*env_vars = fmt.Sprintf("TERM," + *env_vars)
+		}
+		env_vars_pass := strings.Split(*env_vars, ",")
+		for _, env := range env_vars_pass {
+			if value, ok := os.LookupEnv(env); ok {
+				envs += env + "=" + value + "\n"
+			}
+		}
+		if len(*uenv_vars) != 0 {
+			envs += fmt.Sprintf("SSRV_UENV=%s\n", *uenv_vars)
 		}
 	}
 	if !is_alloc_pty {

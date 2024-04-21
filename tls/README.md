@@ -29,7 +29,7 @@ cd shellsrv/tls
 ┌──[user@linux]─[~] - generate key.pem and cert.pem:
 └──╼ $ openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout key.pem -out cert.pem
 ┌──[user@linux]─[~] - Server:
-└──╼ $ shellsrv -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337]
+└──╼ $ shellsrv -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337] [-env all]
 ┌──[user@linux]─[~] - Client:
 └──╼ $ shellsrv [-tls-cert cert.pem] [options] [ COMMAND [ arguments... ] ]
 
@@ -56,6 +56,8 @@ Accepted options:
         TLS cert file for server and client (default "cert.pem")
     -tls-key string
         TLS key file for server (default "key.pem")
+    -uenv string
+        Comma separated list of environment variables for unset on the server side process.
     -version
         Show this program's version
 
@@ -65,6 +67,7 @@ Environment variables:
     SSRV_ALLOC_PTY=1                Same as -pty argument
     SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
+    SSRV_UENV="MY_VAR,MY_VAR1"      Same as -uenv argument
     SSRV_SOCKET="tcp:1337"          Same as -socket argument
     SSRV_CLIENT_TLS=1               Same as -tls argument
     SSRV_TLS_KEY="/path/key.pem"    Same as -tls-key argument
