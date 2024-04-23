@@ -9,3 +9,5 @@ require (
 )
 
 require golang.org/x/sys v0.19.0 // indirect
+
+replace github.com/VHSgunzo/shellsrv/tls => ./tls
