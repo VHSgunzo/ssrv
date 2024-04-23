@@ -16,7 +16,10 @@ create a symlink to it somewhere in your `$PATH` and it'll always be executed th
 ## To get started:
 * **Build the latest revision**
 ```
-go install github.com/VHSgunzo/shellsrv/tls@latest
+git clone https://github.com/VHSgunzo/shellsrv.git
+cd shellsrv/tls
+./build.sh
+./build/$(uname -m)/shellsrv -h
 ```
 * Or take an already precompiled binary file from the [releases](https://github.com/VHSgunzo/shellsrv/releases)
 
