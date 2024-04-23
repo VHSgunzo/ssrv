@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -49,6 +50,7 @@ Environment variables:
     SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
+    SSRV_CWD=/path/dir              Same as -cwd argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
@@ -104,6 +106,10 @@ var nosep_cpids = flag.Bool(
 var pid_file = flag.String(
 	"pid-file", "",
 	"The file for storing the server's PID.",
+)
+var cwd = flag.String(
+	"cwd", "",
+	"Change the current working directory of the process/command.",
 )
 
 type win_size struct {
@@ -243,6 +249,9 @@ func ssrv_env_vars_parse() {
 	if ssrv_pid_file, ok := os.LookupEnv("SSRV_PID_FILE"); ok {
 		flag.Set("pid-file", ssrv_pid_file)
 	}
+	if ssrv_cwd, ok := os.LookupEnv("SSRV_CWD"); ok {
+		flag.Set("cwd", ssrv_cwd)
+	}
 }
 
 func srv_handle(conn net.Conn, self_cpids_dir string) {
@@ -323,8 +332,14 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	log.Printf("[%s] exec: %s", remote, cmd)
 	exec_cmd := exec.Command(cmd[0], cmd[1:]...)
 
+	var cwd string
 	last_env_num -= 1
 	exec_cmd_envs := os.Environ()
+	if strings.HasPrefix(envs[last_env_num], "SSRV_CWD=") {
+		cwd = strings.Replace(envs[last_env_num], "SSRV_CWD=", "", 1)
+		envs = envs[:last_env_num]
+		last_env_num -= 1
+	}
 	if strings.HasPrefix(envs[last_env_num], "SSRV_UENV=") {
 		uenv_vars := strings.Replace(envs[last_env_num], "SSRV_UENV=", "", 1)
 		for _, uenv := range strings.Split(uenv_vars, ",") {
@@ -336,9 +351,26 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 			}
 		}
 		envs = envs[:last_env_num]
+		last_env_num -= 1
 	}
 	exec_cmd.Env = exec_cmd_envs
 	exec_cmd.Env = append(exec_cmd.Env, envs...)
+	if len(cwd) != 0 && is_dir_exists(cwd) {
+		exec_cmd.Dir = cwd
+	} else {
+		for _, env := range envs {
+			pair := strings.SplitN(env, "=", 2)
+			var value string
+			if len(pair) == 2 {
+				key := pair[0]
+				value = pair[1]
+				if strings.HasPrefix(key, "PWD") &&
+					is_dir_exists(value) {
+					exec_cmd.Dir = value
+				}
+			}
+		}
+	}
 
 	var cmd_ptmx *os.File
 	var cmd_stdout, cmd_stderr io.ReadCloser
@@ -467,6 +499,7 @@ func server(proto, socket string) {
 		listener_addr = strings.Replace(listener_addr, "/", "-", -1)
 		self_cpids_dir = fmt.Sprint(*cpids_dir, "/", listener_addr)
 	}
+	self_cpids_dir, _ = filepath.Abs(self_cpids_dir)
 
 	err = os.MkdirAll(self_cpids_dir, 0700)
 	if err != nil {
@@ -530,6 +563,13 @@ func server(proto, socket string) {
 			if is_unset_env {
 				os.Unsetenv(key)
 			}
+		}
+	}
+
+	if len(*cwd) != 0 {
+		err := os.Chdir(*cwd)
+		if err != nil {
+			log.Fatalf("cwd path error: %v\n", err)
 		}
 	}
 
@@ -632,6 +672,9 @@ func client(proto, socket string, exec_args []string) int {
 		if len(*uenv_vars) != 0 {
 			envs += fmt.Sprintf("SSRV_UENV=%s\n", *uenv_vars)
 		}
+	}
+	if len(*cwd) != 0 {
+		envs += fmt.Sprintf("SSRV_CWD=%s\n", *cwd)
 	}
 	if !is_alloc_pty {
 		envs += "is_alloc_pty := false"

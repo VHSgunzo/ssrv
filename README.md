@@ -33,6 +33,8 @@ If COMMAND is not passed, spawn a $SHELL on the server side.
 Accepted options:
     -cpids-dir string
         A directory on the server side for storing a list of client PIDs. (default "/tmp/ssrv$EUID")
+    -cwd string
+        Change the current working directory of the process/command.
     -env string
         Comma separated list of environment variables to pass to the server side process. (default "TERM")
     -no-pty
@@ -63,6 +65,7 @@ Environment variables:
     SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
+    SSRV_CWD=/path/dir              Same as -cwd argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
