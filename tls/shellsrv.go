@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,7 +25,9 @@ import (
 
 	"github.com/creack/pty"
 	"github.com/hashicorp/yamux"
+	"github.com/shirou/gopsutil/v3/process"
 	"golang.org/x/crypto/bcrypt"
+	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
 
@@ -275,6 +278,38 @@ func ssrv_env_vars_parse() {
 	}
 }
 
+func child_pids_walk(pid int, wg *sync.WaitGroup, child_pids *[]int) {
+	defer wg.Done()
+	proc, _ := process.NewProcess(int32(pid))
+	proc_child, _ := proc.Children()
+	for _, child := range proc_child {
+		*child_pids = append(*child_pids, int(child.Pid))
+		wg.Add(1)
+		go child_pids_walk(int(child.Pid), wg, child_pids)
+	}
+}
+
+func get_child_pids(pid int) []int {
+	var wg sync.WaitGroup
+	var child_pids []int
+	wg.Add(1)
+	child_pids_walk(int(pid), &wg, &child_pids)
+	wg.Wait()
+	sort.Slice(child_pids, func(i, j int) bool {
+		return child_pids[i] < child_pids[j]
+	})
+	return child_pids
+}
+
+func is_pid_exist(pid int) bool {
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.SIGCONT)
+	return err == nil
+}
+
 func get_cert_sha256(cert string) ([]byte, error) {
 	cert_bytes, err := os.ReadFile(cert)
 	if err != nil {
@@ -454,6 +489,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		exec_cmd.Stdin = stdin_channel
 		cmd_stdout, _ = exec_cmd.StdoutPipe()
 		cmd_stderr, _ = exec_cmd.StderrPipe()
+		exec_cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		err = exec_cmd.Start()
 	}
 	if err != nil {
@@ -465,8 +501,9 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		return
 	}
 
-	cmd_pid := strconv.Itoa(exec_cmd.Process.Pid)
-	log.Printf("[%s] pid: %s", remote, cmd_pid)
+	cmd_pid := exec_cmd.Process.Pid
+	cmd_pgid, _ := syscall.Getpgid(cmd_pid)
+	log.Printf("[%s] pid: %d", remote, cmd_pid)
 
 	cpid := fmt.Sprint(self_cpids_dir, "/", cmd_pid)
 	if is_dir_exists(self_cpids_dir) {
@@ -480,18 +517,19 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 			touch_file(cpid)
 		}
 	}
+	defer os.Remove(cpid)
 
 	cp := func(dst io.Writer, src io.Reader) {
 		defer wg.Done()
 		io.Copy(dst, src)
 	}
 
+	control_channel, err := session.Accept()
+	if err != nil {
+		log.Printf("[%s] control channel accept error: %v", remote, err)
+		return
+	}
 	if is_alloc_pty {
-		control_channel, err := session.Accept()
-		if err != nil {
-			log.Printf("[%s] control channel accept error: %v", remote, err)
-			return
-		}
 		go func() {
 			decoder := gob.NewDecoder(control_channel)
 			for {
@@ -515,6 +553,52 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		go cp(data_channel, cmd_ptmx)
 		go cp(cmd_ptmx, data_channel)
 	} else {
+		go func() {
+			exec_cmd_kill := func(sig syscall.Signal) {
+				child_pids := []int{cmd_pid}
+				child_pids = append(child_pids, get_child_pids(cmd_pid)...)
+
+				syscall.Kill(-cmd_pgid, sig)
+				pgid_wait := time.Second
+				for {
+					if is_pid_exist(-cmd_pgid) && pgid_wait != 0 {
+						pgid_wait -= 10 * time.Millisecond
+						time.Sleep(10 * time.Millisecond)
+					} else {
+						break
+					}
+				}
+
+				for _, pid := range child_pids {
+					syscall.Kill(pid, sig)
+					if is_pid_exist(pid) &&
+						sig != syscall.SIGHUP &&
+						sig != syscall.SIGUSR1 &&
+						sig != syscall.SIGUSR2 {
+						syscall.Kill(pid, syscall.SIGKILL)
+					}
+				}
+			}
+			reader := bufio.NewReader(control_channel)
+			sig, err := reader.ReadString('\r')
+			if err != nil && err != io.EOF {
+				log.Printf("[%s] control channel reader error: %v", remote, err)
+			}
+			switch sig {
+			case "SIGINT\r":
+				exec_cmd_kill(syscall.SIGINT)
+			case "SIGTERM\r":
+				exec_cmd_kill(syscall.SIGTERM)
+			case "SIGQUIT\r":
+				exec_cmd_kill(syscall.SIGQUIT)
+			case "SIGHUP\r":
+				exec_cmd_kill(syscall.SIGHUP)
+			case "SIGUSR1\r":
+				exec_cmd_kill(syscall.SIGUSR1)
+			case "SIGUSR2\r":
+				exec_cmd_kill(syscall.SIGUSR2)
+			}
+		}()
 		wg.Add(2)
 		go cp(data_channel, cmd_stdout)
 		go cp(stderr_channel, cmd_stderr)
@@ -539,7 +623,6 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	}
 
 	wg.Wait()
-	os.Remove(cpid)
 }
 
 func server(proto, socket string) {
@@ -714,7 +797,7 @@ func client(proto, socket string, exec_args []string) int {
 		if err != nil {
 			log.Fatalf("error reading hash status: %v", err)
 		}
-		if strings.Contains(status, "error") {
+		if status == "error\r" {
 			log.Fatalf("invalid cert!")
 		}
 	} else {
@@ -725,7 +808,9 @@ func client(proto, socket string, exec_args []string) int {
 	}
 	defer conn.Close()
 
-	session, err := yamux.Client(conn, nil)
+	yamux_config := yamux.DefaultConfig()
+	yamux_config.StreamOpenTimeout = 0
+	session, err := yamux.Client(conn, yamux_config)
 	if err != nil {
 		log.Fatalf("session error: %v", err)
 	}
@@ -741,22 +826,33 @@ func client(proto, socket string, exec_args []string) int {
 	if term.IsTerminal(stdin) {
 		is_stdin_term = true
 	}
-
 	stdout := int(os.Stdout.Fd())
 	is_stdout_term := false
 	if term.IsTerminal(stdout) {
 		is_stdout_term = true
 	}
-
 	stderr := int(os.Stderr.Fd())
 	is_stderr_term := false
 	if term.IsTerminal(stderr) {
 		is_stderr_term = true
 	}
 
+	pid := os.Getpid()
+	pgid, err := unix.Getpgid(pid)
+	if err != nil {
+		log.Fatalf("error getting process group ID: %v", err)
+	}
+	is_foreground := true
+	tpgid, err := unix.IoctlGetInt(unix.Stdin, unix.TIOCGPGRP)
+	if err == nil && pgid != tpgid {
+		is_foreground = false
+	}
+
 	var term_old_state *term.State
-	if (is_stdin_term && is_stderr_term && is_stdout_term) || (*is_pty && is_stdin_term) {
+	if (is_stdin_term && is_stderr_term && is_stdout_term && is_foreground) ||
+		(*is_pty && is_stdin_term) {
 		if is_alloc_pty && is_stdin_term {
+			is_foreground = true
 			term_old_state, err = term.MakeRaw(stdin)
 			if err != nil {
 				log.Fatalf("unable to make terminal raw: %v", err)
@@ -852,11 +948,11 @@ func client(proto, socket string, exec_args []string) int {
 		io.Copy(dst, src)
 	}
 
+	control_channel, err := session.Open()
+	if err != nil {
+		log.Fatalf("control channel open error: %v", err)
+	}
 	if is_alloc_pty {
-		control_channel, err := session.Open()
-		if err != nil {
-			log.Fatalf("control channel open error: %v", err)
-		}
 		go func() {
 			encoder := gob.NewEncoder(control_channel)
 			sig := make(chan os.Signal, 1)
@@ -876,14 +972,40 @@ func client(proto, socket string, exec_args []string) int {
 				<-sig
 			}
 		}()
+	} else {
+		sig_chan := make(chan os.Signal, 1)
+		signal.Notify(sig_chan, os.Interrupt,
+			syscall.SIGINT, syscall.SIGTERM,
+			syscall.SIGHUP, syscall.SIGQUIT,
+			syscall.SIGUSR1, syscall.SIGUSR2,
+		)
+		go func() {
+			sig := <-sig_chan
+			switch sig {
+			case syscall.SIGINT:
+				control_channel.Write([]byte("SIGINT\r"))
+			case syscall.SIGTERM:
+				control_channel.Write([]byte("SIGTERM\r"))
+			case syscall.SIGQUIT:
+				control_channel.Write([]byte("SIGQUIT\r"))
+			case syscall.SIGHUP:
+				control_channel.Write([]byte("SIGHUP\r"))
+			case syscall.SIGUSR1:
+				control_channel.Write([]byte("SIGUSR1\r"))
+			case syscall.SIGUSR2:
+				control_channel.Write([]byte("SIGUSR2\r"))
+			}
+		}()
 	}
 
-	if !is_stdin_term {
-		wg.Add(1)
-		go pipe_stdin(stdin_channel, os.Stdin)
-	} else {
-		wg.Add(1)
-		go cp(data_channel, os.Stdin)
+	if is_foreground {
+		if !is_stdin_term {
+			wg.Add(1)
+			go pipe_stdin(stdin_channel, os.Stdin)
+		} else {
+			wg.Add(1)
+			go cp(data_channel, os.Stdin)
+		}
 	}
 	if !is_alloc_pty {
 		wg.Add(1)
@@ -902,15 +1024,17 @@ func client(proto, socket string, exec_args []string) int {
 		if err != nil {
 			log.Printf("failed to parse exit code: %v", err)
 		}
-	} else {
+	} else if err != io.EOF {
 		log.Printf("error reading from command channel: %v", err)
 	}
 
 	if term_old_state != nil {
 		term.Restore(stdin, term_old_state)
-		wg.Done()
+		if is_foreground {
+			wg.Done()
+		}
 	}
-	if is_stdin_term && ((!*is_pty && !*is_no_pty) ||
+	if is_foreground && is_stdin_term && ((!*is_pty && !*is_no_pty) ||
 		(*is_no_pty && (!is_stdout_term || !is_stderr_term)) || *is_no_pty) {
 		if !is_stderr_term || !is_alloc_pty {
 			wg.Done()
