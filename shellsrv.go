@@ -30,8 +30,11 @@ import (
 
 var VERSION string = "HEAD"
 
+const ENV_VARS = "TERM"
 const BINARY_NAME = "shellsrv"
 const UNIX_SOCKET = "unix:@shellsrv"
+
+var CPIDS_DIR = fmt.Sprint("/tmp/ssrv", syscall.Geteuid())
 
 const USAGE_PREAMBLE = `Server usage: %[1]s -server [-socket tcp:1337] [-env all]
 Client usage: %[1]s [options] [ COMMAND [ arguments... ] ]
@@ -61,7 +64,6 @@ Environment variables:
 If none of the pty arguments are passed in the client, a pseudo-terminal is allocated by default, unless it is
 known that the command behaves incorrectly when attached to the pty or the client is not running in the terminal`
 
-var is_alloc_pty = true
 var pty_blocklist = map[string]bool{
 	"gio":       true,
 	"podman":    true,
@@ -79,7 +81,7 @@ var socket_addr = flag.String(
 	"Socket address listen/connect (unix,tcp,tcp4,tcp6)",
 )
 var env_vars = flag.String(
-	"env", "TERM",
+	"env", ENV_VARS,
 	"Comma separated list of environment variables for pass to the server side process.",
 )
 var uenv_vars = flag.String(
@@ -99,7 +101,7 @@ var is_no_pty = flag.Bool(
 	"Do not allocate a pseudo-terminal for the server side process",
 )
 var cpids_dir = flag.String(
-	"cpids-dir", fmt.Sprint("/tmp/ssrv", syscall.Geteuid()),
+	"cpids-dir", CPIDS_DIR,
 	"A directory on the server side for storing a list of client PIDs.",
 )
 var nosep_cpids = flag.Bool(
@@ -228,31 +230,40 @@ func flag_parse() []string {
 }
 
 func ssrv_env_vars_parse() {
-	if is_env_var_eq("SSRV_ALLOC_PTY", "1") {
+	if is_env_var_eq("SSRV_ALLOC_PTY", "1") &&
+		!*is_pty {
 		flag.Set("pty", "true")
 	}
-	if is_env_var_eq("SSRV_NO_ALLOC_PTY", "1") {
+	if is_env_var_eq("SSRV_NO_ALLOC_PTY", "1") &&
+		!*is_no_pty {
 		flag.Set("no-pty", "true")
 	}
-	if ssrv_socket, ok := os.LookupEnv("SSRV_SOCKET"); ok {
-		flag.Set("socket", ssrv_socket)
-	}
-	if ssrv_env, ok := os.LookupEnv("SSRV_ENV"); ok {
-		flag.Set("env", ssrv_env)
-	}
-	if ssrv_uenv, ok := os.LookupEnv("SSRV_UENV"); ok {
-		flag.Set("uenv", ssrv_uenv)
-	}
-	if ssrv_cpids_dir, ok := os.LookupEnv("SSRV_CPIDS_DIR"); ok {
-		flag.Set("cpids-dir", ssrv_cpids_dir)
-	}
-	if is_env_var_eq("SSRV_NOSEP_CPIDS", "1") {
+	if is_env_var_eq("SSRV_NOSEP_CPIDS", "1") &&
+		!*nosep_cpids {
 		flag.Set("nosep-cpids", "true")
 	}
-	if ssrv_pid_file, ok := os.LookupEnv("SSRV_PID_FILE"); ok {
+	if ssrv_env, ok := os.LookupEnv("SSRV_ENV"); ok &&
+		*env_vars == ENV_VARS {
+		flag.Set("env", ssrv_env)
+	}
+	if ssrv_socket, ok := os.LookupEnv("SSRV_SOCKET"); ok &&
+		*socket_addr == UNIX_SOCKET {
+		flag.Set("socket", ssrv_socket)
+	}
+	if ssrv_cpids_dir, ok := os.LookupEnv("SSRV_CPIDS_DIR"); ok &&
+		*cpids_dir == CPIDS_DIR {
+		flag.Set("cpids-dir", ssrv_cpids_dir)
+	}
+	if ssrv_uenv, ok := os.LookupEnv("SSRV_UENV"); ok &&
+		*uenv_vars == "" {
+		flag.Set("uenv", ssrv_uenv)
+	}
+	if ssrv_pid_file, ok := os.LookupEnv("SSRV_PID_FILE"); ok &&
+		*pid_file == "" {
 		flag.Set("pid-file", ssrv_pid_file)
 	}
-	if ssrv_cwd, ok := os.LookupEnv("SSRV_CWD"); ok {
+	if ssrv_cwd, ok := os.LookupEnv("SSRV_CWD"); ok &&
+		*cwd == "" {
 		flag.Set("cwd", ssrv_cwd)
 	}
 }
@@ -293,7 +304,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	var wg sync.WaitGroup
 	disconnect := func(session *yamux.Session, remote string) {
 		session.Close()
-		log.Printf("[%s] [  DISCONNECTED  ]", remote)
+		log.Printf("[%s] [  DISCONNECT  ]", remote)
 	}
 
 	defer conn.Close()
@@ -305,7 +316,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		return
 	}
 	defer disconnect(session, remote)
-	log.Printf("[%s] [ NEW CONNECTION ]", remote)
+	log.Printf("[%s] [    CONNECT   ]", remote)
 
 	envs_channel, err := session.Accept()
 	if err != nil {
@@ -322,9 +333,10 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	envs := strings.Split(envs_str, "\n")
 	last_env_num := len(envs) - 1
 
+	is_alloc_pty := true
 	var stdin_channel net.Conn
 	var stderr_channel net.Conn
-	if envs[last_env_num] == "is_alloc_pty := false" {
+	if envs[last_env_num] == "_NO_PTY_" {
 		is_alloc_pty = false
 		envs = envs[:last_env_num]
 
@@ -364,26 +376,29 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		cmd_str = get_shell()
 	}
 	cmd := strings.Split(cmd_str, "\n")
-	log.Printf("[%s] exec: %s", remote, cmd)
 	exec_cmd := exec.Command(cmd[0], cmd[1:]...)
 
 	var cwd string
 	last_env_num -= 1
 	exec_cmd_envs := os.Environ()
-	if strings.HasPrefix(envs[last_env_num], "SSRV_CWD=") {
-		cwd = strings.Replace(envs[last_env_num], "SSRV_CWD=", "", 1)
+	if strings.HasPrefix(envs[last_env_num], "_SSRV_CWD=") {
+		cwd = strings.Replace(envs[last_env_num], "_SSRV_CWD=", "", 1)
 		envs = envs[:last_env_num]
 		last_env_num -= 1
 	}
-	if strings.HasPrefix(envs[last_env_num], "SSRV_UENV=") {
-		uenv_vars := strings.Replace(envs[last_env_num], "SSRV_UENV=", "", 1)
-		for _, uenv := range strings.Split(uenv_vars, ",") {
-			for num, env := range exec_cmd_envs {
-				pair := strings.SplitN(env, "=", 2)
-				if pair[0] == uenv {
-					exec_cmd_envs = append(exec_cmd_envs[:num], exec_cmd_envs[num+1:]...)
+	if strings.HasPrefix(envs[last_env_num], "_SSRV_UENV=") {
+		uenv_vars := strings.Replace(envs[last_env_num], "_SSRV_UENV=", "", 1)
+		if uenv_vars != "all" {
+			for _, uenv := range strings.Split(uenv_vars, ",") {
+				for num, env := range exec_cmd_envs {
+					pair := strings.SplitN(env, "=", 2)
+					if pair[0] == uenv {
+						exec_cmd_envs = append(exec_cmd_envs[:num], exec_cmd_envs[num+1:]...)
+					}
 				}
 			}
+		} else {
+			exec_cmd_envs = nil
 		}
 		envs = envs[:last_env_num]
 		last_env_num -= 1
@@ -429,14 +444,14 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 	cmd_pid := exec_cmd.Process.Pid
 	cmd_pgid, _ := syscall.Getpgid(cmd_pid)
-	log.Printf("[%s] pid: %d", remote, cmd_pid)
+	log.Printf("[%s] PID: %d -> EXEC: %s", remote, cmd_pid, cmd)
 
 	cpid := fmt.Sprint(self_cpids_dir, "/", cmd_pid)
 	if is_dir_exists(self_cpids_dir) {
 		proc_pid := fmt.Sprint("/proc/", cmd_pid)
 		if is_dir_exists(proc_pid) {
 			if err := os.Symlink(proc_pid, cpid); err != nil {
-				log.Printf("[%s] symlink error: %v", remote, err)
+				log.Printf("[%s] PID: %d -> symlink error: %v", remote, cmd_pid, err)
 				return
 			}
 		} else {
@@ -452,7 +467,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 	control_channel, err := session.Accept()
 	if err != nil {
-		log.Printf("[%s] control channel accept error: %v", remote, err)
+		log.Printf("[%s] PID: %d -> control channel accept error: %v", remote, cmd_pid, err)
 		return
 	}
 	if is_alloc_pty {
@@ -466,11 +481,11 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 					break
 				}
 				if err := set_term_size(cmd_ptmx, win.Rows, win.Cols); err != nil {
-					log.Printf("[%s] set term size error: %v", remote, err)
+					log.Printf("[%s] PID: %d -> set term size error: %v", remote, cmd_pid, err)
 					break
 				}
 				if err := syscall.Kill(exec_cmd.Process.Pid, syscall.SIGWINCH); err != nil {
-					log.Printf("[%s] sigwinch error: %v", remote, err)
+					log.Printf("[%s] PID: %d -> sigwinch error: %v", remote, cmd_pid, err)
 					break
 				}
 			}
@@ -508,7 +523,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 			reader := bufio.NewReader(control_channel)
 			sig, err := reader.ReadString('\r')
 			if err != nil && err != io.EOF {
-				log.Printf("[%s] control channel reader error: %v", remote, err)
+				log.Printf("[%s] PID: %d -> control channel reader error: %v", remote, cmd_pid, err)
 			}
 			switch sig {
 			case "SIGINT\r":
@@ -532,15 +547,15 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 	state, err := exec_cmd.Process.Wait()
 	if err != nil {
-		log.Printf("[%s] error getting exit code: %v", remote, err)
+		log.Printf("[%s] PID: %d -> error getting exit code: %v", remote, cmd_pid, err)
 		return
 	}
 	exit_code := strconv.Itoa(state.ExitCode())
-	log.Printf("[%s] exit: %s", remote, exit_code)
+	log.Printf("[%s] PID: %d -> EXIT: %s", remote, cmd_pid, exit_code)
 
 	_, err = command_channel.Write([]byte(fmt.Sprint(exit_code + "\r\n")))
 	if err != nil {
-		log.Printf("[%s] error sending exit code: %v", remote, err)
+		log.Printf("[%s] PID: %d -> error sending exit code: %v", remote, cmd_pid, err)
 		return
 	}
 
@@ -622,25 +637,29 @@ func server(proto, socket string) {
 			pair := strings.SplitN(env, "=", 2)
 			key := pair[0]
 			is_unset_env := true
-			env_vars_pass = append(env_vars_pass,
-				"PATH", "SHELL", "HOME", "MAIL", "USER", "LOGNAME",
-				"DISPLAY", "WAYLAND_DISPLAY", "LANG", "LANGUAGE",
-				"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
-				"XDG_SESSION_CLASS", "XDG_SESSION_TYPE",
-				"XDG_DATA_DIRS", "XDG_CONFIG_DIRS",
-				"XDG_SESSION_DESKTOP", "XDG_CURRENT_DESKTOP",
-				"KDE_FULL_SESSION", "KDE_SESSION_VERSION",
-			)
+			if *uenv_vars != "all" {
+				env_vars_pass = append(env_vars_pass,
+					"PATH", "SHELL", "HOME", "MAIL", "USER", "LOGNAME",
+					"DISPLAY", "WAYLAND_DISPLAY", "LANG", "LANGUAGE",
+					"DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR",
+					"XDG_SESSION_CLASS", "XDG_SESSION_TYPE",
+					"XDG_DATA_DIRS", "XDG_CONFIG_DIRS",
+					"XDG_SESSION_DESKTOP", "XDG_CURRENT_DESKTOP",
+					"KDE_FULL_SESSION", "KDE_SESSION_VERSION",
+				)
+			}
 			for _, env_pass := range env_vars_pass {
 				if key == env_pass {
 					is_unset_env = false
 					break
 				}
 			}
-			for _, uenv_pass := range uenv_vars_pass {
-				if key == uenv_pass {
-					is_unset_env = true
-					break
+			if *uenv_vars != "all" && !is_unset_env {
+				for _, uenv_pass := range uenv_vars_pass {
+					if key == uenv_pass {
+						is_unset_env = true
+						break
+					}
 				}
 			}
 			if is_unset_env {
@@ -668,6 +687,8 @@ func server(proto, socket string) {
 
 func client(proto, socket string, exec_args []string) int {
 	var wg sync.WaitGroup
+
+	is_alloc_pty := true
 	if len(exec_args) != 0 {
 		is_alloc_pty = !pty_blocklist[exec_args[0]]
 	}
@@ -766,14 +787,14 @@ func client(proto, socket string, exec_args []string) int {
 			}
 		}
 		if len(*uenv_vars) != 0 {
-			envs += fmt.Sprintf("SSRV_UENV=%s\n", *uenv_vars)
+			envs += fmt.Sprintf("_SSRV_UENV=%s\n", *uenv_vars)
 		}
 	}
 	if len(*cwd) != 0 {
-		envs += fmt.Sprintf("SSRV_CWD=%s\n", *cwd)
+		envs += fmt.Sprintf("_SSRV_CWD=%s\n", *cwd)
 	}
 	if !is_alloc_pty {
-		envs += "is_alloc_pty := false"
+		envs += "_NO_PTY_"
 	}
 	envs += "\r\n"
 	envs_channel, err := session.Open()
