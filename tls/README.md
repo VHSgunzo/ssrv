@@ -1,5 +1,5 @@
-# shellsrv
-`shellsrv` is a versatile networking tool designed to enable efficient command execution across different systems. It operates as both a server and a client, facilitating remote shell access and command execution. With a focus on flexibility and control, users can specify environment variables, choose whether to allocate a pseudo-terminal, and define the socket for communication.
+# ssrv
+`ssrv` is a versatile networking tool designed to enable efficient command execution across different systems. It operates as both a server and a client, facilitating remote shell access and command execution. With a focus on flexibility and control, users can specify environment variables, choose whether to allocate a pseudo-terminal, and define the socket for communication.
 
 Key features include:
 
@@ -8,20 +8,20 @@ Key features include:
 - **Pseudo-Terminal Allocation**: Offers options to force or avoid allocating a pseudo-terminal, accommodating various command behaviors and client requirements.
 - **Command Execution**: When no command is passed, the default behavior is to spawn a shell on the server side, offering full shell functionality to the client. The remote command exit code is also returned to the client.
 - **Shims for the server side binaries**: If there's a process that you always want to execute on the server side system, you can
-create a symlink to it somewhere in your `$PATH` and it'll always be executed through `shellsrv`.
+create a symlink to it somewhere in your `$PATH` and it'll always be executed through `ssrv`.
 - **Stdin Pipe**: Sends data to the command's standard input using a pipe.
 
-`shellsrv` is ideal for system administrators and developers who require a solution for executing commands remotely or locally with  listening on unix sockets. By default, the server and the client communicate via an abstract unix socket `@shellsrv`. Its configurability and support for multiple concurrent sessions make it suitable for complex network operations and management tasks.
+`ssrv` is ideal for system administrators and developers who require a solution for executing commands remotely or locally with  listening on unix sockets. By default, the server and the client communicate via an abstract unix socket `@ssrv`. Its configurability and support for multiple concurrent sessions make it suitable for complex network operations and management tasks.
 
 ## To get started:
 * **Build the latest revision**
 ```
-git clone https://github.com/VHSgunzo/shellsrv.git
-cd shellsrv/tls
+git clone https://github.com/VHSgunzo/ssrv.git
+cd ssrv/tls
 ./build.sh
-./build/$(uname -m)/shellsrv -h
+./build/$(uname -m)/ssrv -h
 ```
-* Or take an already precompiled binary file from the [releases](https://github.com/VHSgunzo/shellsrv/releases)
+* Or take an already precompiled binary file from the [releases](https://github.com/VHSgunzo/ssrv/releases)
 
 
 ## **Usage**:
@@ -29,9 +29,9 @@ cd shellsrv/tls
 ┌──[user@linux]─[~] - generate key.pem and cert.pem:
 └──╼ $ openssl req -newkey rsa:2048 -new -nodes -x509 -days 3650 -keyout key.pem -out cert.pem
 ┌──[user@linux]─[~] - Server:
-└──╼ $ shellsrv -server [-tls-key key.pem] [-tls-cert cert.pem] [-socket tcp:1337] [-env all]
+└──╼ $ ssrv -srv [-tls-key key.pem] [-tls-cert cert.pem] [-sock tcp:1337] [-env all]
 ┌──[user@linux]─[~] - Client:
-└──╼ $ shellsrv [-tls-cert cert.pem] [options] [ COMMAND [ arguments... ] ]
+└──╼ $ ssrv [-tls-cert cert.pem] [options] [ COMMAND [ arguments... ] ]
 
 If COMMAND is not passed, spawn a $SHELL on the server side.
 
@@ -50,28 +50,27 @@ Accepted options:
         The file for storing the server's PID.
     -pty
         Force allocate a pseudo-terminal for the server side process
-    -server
+    -srv
         Run as server
-    -socket string
-        Socket address listen/connect (unix,tcp,tcp4,tcp6) (default "unix:@shellsrv")
+    -sock string
+        Socket address listen/connect (unix,tcp,tcp4,tcp6) (default "unix:@ssrv")
     -tls-cert string
         TLS cert file for server and client (default "cert.pem")
     -tls-key string
         TLS key file for server (default "key.pem")
     -uenv string
         Comma separated list of environment variables for unset on the server side process.
-    -version
+    -v
         Show this program's version
 
 --
 
 Environment variables:
-    SSRV_ALLOC_PTY=1                Same as -pty argument
-    SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
+    SSRV_PTY=1                      Same as -pty argument
+    SSRV_NO_PTY=1                   Same as -no-pty argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
     SSRV_UENV="MY_VAR,MY_VAR1"      Same as -uenv argument
-    SSRV_SOCKET="tcp:1337"          Same as -socket argument
-    SSRV_CLIENT_TLS=1               Same as -tls argument
+    SSRV_SOCK="tcp:1337"            Same as -sock argument
     SSRV_TLS_KEY="/path/key.pem"    Same as -tls-key argument
     SSRV_TLS_CERT="/path/cert.pem"  Same as -tls-cert argument
     SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
@@ -94,8 +93,8 @@ Example of creating a shim for the `flatpak` command:
 $ flatpak --version
 zsh: command not found: flatpak
 
-# Have shellsrv handle any flatpak command
-$ ln -s /usr/local/bin/shellsrv /usr/local/bin/flatpak
+# Have ssrv handle any flatpak command
+$ ln -s /usr/local/bin/ssrv /usr/local/bin/flatpak
 
 # Now flatpak will always be executed on the server side
 $ flatpak --version
@@ -107,20 +106,20 @@ Example of file transfer to server:
 
 ```
 # one file:
-shellsrv sh -c 'cat>/server/path/some_file.tar.zst' </client/path/some_file.tar.zst
+ssrv sh -c 'cat>/server/path/some_file.tar.zst' </client/path/some_file.tar.zst
 
 # directory with zstd compression:
-tar -I 'zstd -T0 -1' -c /client/path/some_dir|shellsrv tar --zstd -xf - -C /server/path/some_dir
+tar -I 'zstd -T0 -1' -c /client/path/some_dir|ssrv tar --zstd -xf - -C /server/path/some_dir
 ```
 
 Example of file transfer from server:
 
 ```
 # one file:
-shellsrv cat /server/path/some_file.tar.zst > /client/path/some_file.tar.zst
+ssrv cat /server/path/some_file.tar.zst > /client/path/some_file.tar.zst
 
 # directory with zstd compression:
-shellsrv tar -I 'zstd -T0 -1' -c /server/path/some_dir|tar --zstd -xf - -C /client/path/some_dir
+ssrv tar -I 'zstd -T0 -1' -c /server/path/some_dir|tar --zstd -xf - -C /client/path/some_dir
 # or dir to archive:
-shellsrv tar -I 'zstd -T0 -1' -c /server/path/some_dir > /client/path/some_dir.tar.zst
+ssrv tar -I 'zstd -T0 -1' -c /server/path/some_dir > /client/path/some_dir.tar.zst
 ```

@@ -2,6 +2,8 @@ package main
 
 import (
 	"bufio"
+	"crypto/sha256"
+	"crypto/tls"
 	"encoding/gob"
 	"flag"
 	"fmt"
@@ -24,6 +26,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/hashicorp/yamux"
 	"github.com/shirou/gopsutil/v3/process"
+	"golang.org/x/crypto/bcrypt"
 	"golang.org/x/sys/unix"
 	"golang.org/x/term"
 )
@@ -31,13 +34,15 @@ import (
 var VERSION string = "HEAD"
 
 const ENV_VARS = "TERM"
-const BINARY_NAME = "shellsrv"
-const UNIX_SOCKET = "unix:@shellsrv"
+const TLS_KEY = "key.pem"
+const TLS_CERT = "cert.pem"
+const BINARY_NAME = "ssrv"
+const UNIX_SOCKET = "unix:@ssrv"
 
 var CPIDS_DIR = fmt.Sprint("/tmp/ssrv", syscall.Geteuid())
 
-const USAGE_PREAMBLE = `Server usage: %[1]s -server [-socket tcp:1337] [-env all]
-Client usage: %[1]s [options] [ COMMAND [ arguments... ] ]
+const USAGE_PREAMBLE = `Server usage: %[1]s -srv [-tls-key key.pem] [-tls-cert cert.pem] [-sock tcp:1337] [-env all]
+Client usage: %[1]s [-tls-cert cert.pem] [options] [ COMMAND [ arguments... ] ]
 
 If COMMAND is not passed, spawn a $SHELL on the server side.
 
@@ -48,11 +53,13 @@ const USAGE_FOOTER = `
 --
 
 Environment variables:
-    SSRV_ALLOC_PTY=1                Same as -pty argument
-    SSRV_NO_ALLOC_PTY=1             Same as -no-pty argument
+    SSRV_PTY=1                      Same as -pty argument
+    SSRV_NO_PTY=1                   Same as -no-pty argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
     SSRV_UENV="MY_VAR,MY_VAR1"      Same as -uenv argument
-    SSRV_SOCKET="tcp:1337"          Same as -socket argument
+    SSRV_SOCK="tcp:1337"            Same as -sock argument
+    SSRV_TLS_KEY="/path/key.pem"    Same as -tls-key argument
+    SSRV_TLS_CERT="/path/cert.pem"  Same as -tls-cert argument
     SSRV_CPIDS_DIR=/path/dir        Same as -cpids-dir argument
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
@@ -73,11 +80,11 @@ var pty_blocklist = map[string]bool{
 }
 
 var is_srv = flag.Bool(
-	"server", false,
+	"srv", false,
 	"Run as server",
 )
 var socket_addr = flag.String(
-	"socket", UNIX_SOCKET,
+	"sock", UNIX_SOCKET,
 	"Socket address listen/connect (unix,tcp,tcp4,tcp6)",
 )
 var env_vars = flag.String(
@@ -89,7 +96,7 @@ var uenv_vars = flag.String(
 	"Comma separated list of environment variables for unset on the server side process.",
 )
 var is_version = flag.Bool(
-	"version", false,
+	"v", false,
 	"Show this program's version",
 )
 var is_pty = flag.Bool(
@@ -99,6 +106,14 @@ var is_pty = flag.Bool(
 var is_no_pty = flag.Bool(
 	"no-pty", false,
 	"Do not allocate a pseudo-terminal for the server side process",
+)
+var tls_cert = flag.String(
+	"tls-cert", TLS_CERT,
+	"TLS cert file for server and client",
+)
+var tls_key = flag.String(
+	"tls-key", TLS_KEY,
+	"TLS key file for server",
 )
 var cpids_dir = flag.String(
 	"cpids-dir", CPIDS_DIR,
@@ -229,12 +244,22 @@ func flag_parse() []string {
 	return flag.Args()
 }
 
+func ssrv_env_vars_unset() {
+	for _, env := range os.Environ() {
+		pair := strings.SplitN(env, "=", 2)
+		key := pair[0]
+		if strings.HasPrefix(key, "SSRV_") {
+			os.Unsetenv(key)
+		}
+	}
+}
+
 func ssrv_env_vars_parse() {
-	if is_env_var_eq("SSRV_ALLOC_PTY", "1") &&
+	if is_env_var_eq("SSRV_PTY", "1") &&
 		!*is_pty {
 		flag.Set("pty", "true")
 	}
-	if is_env_var_eq("SSRV_NO_ALLOC_PTY", "1") &&
+	if is_env_var_eq("SSRV_NO_PTY", "1") &&
 		!*is_no_pty {
 		flag.Set("no-pty", "true")
 	}
@@ -246,7 +271,7 @@ func ssrv_env_vars_parse() {
 		*env_vars == ENV_VARS {
 		flag.Set("env", ssrv_env)
 	}
-	if ssrv_socket, ok := os.LookupEnv("SSRV_SOCKET"); ok &&
+	if ssrv_socket, ok := os.LookupEnv("SSRV_SOCK"); ok &&
 		*socket_addr == UNIX_SOCKET {
 		flag.Set("socket", ssrv_socket)
 	}
@@ -265,6 +290,14 @@ func ssrv_env_vars_parse() {
 	if ssrv_cwd, ok := os.LookupEnv("SSRV_CWD"); ok &&
 		*cwd == "" {
 		flag.Set("cwd", ssrv_cwd)
+	}
+	if ssrv_tls_key, ok := os.LookupEnv("SSRV_TLS_KEY"); ok &&
+		*tls_key == TLS_KEY && is_file_exists(ssrv_tls_key) {
+		flag.Set("tls-key", ssrv_tls_key)
+	}
+	if ssrv_tls_cert, ok := os.LookupEnv("SSRV_TLS_CERT"); ok &&
+		*tls_cert == TLS_CERT && is_file_exists(ssrv_tls_cert) {
+		flag.Set("tls-cert", ssrv_tls_cert)
 	}
 }
 
@@ -300,6 +333,42 @@ func is_pid_exist(pid int) bool {
 	return err == nil
 }
 
+func get_cert_sha256(cert string) ([]byte, error) {
+	cert_bytes, err := os.ReadFile(cert)
+	if err != nil {
+		return []byte(""), err
+	}
+	cert_str := string(cert_bytes)
+	cert_str = strings.Replace(cert_str, "-----BEGIN CERTIFICATE-----", "-----CERT_SHA256-----", -1)
+	cert_str = strings.Replace(cert_str, "-----END CERTIFICATE-----", "-----CERT_SHA256-----", -1)
+	cert_sha256 := sha256.Sum256([]byte(cert_str))
+	return cert_sha256[:], nil
+}
+
+func get_cert_hash(cert string) (string, error) {
+	cert_sha256, err := get_cert_sha256(cert)
+	if err != nil {
+		return "", err
+	}
+	hash_bytes, err := bcrypt.GenerateFromPassword(cert_sha256, bcrypt.DefaultCost)
+	if err != nil {
+		return "", err
+	}
+	return string(hash_bytes), nil
+}
+
+func verify_cert_hash(provided_cert_hash, cert string) (bool, error) {
+	cert_sha256, err := get_cert_sha256(cert)
+	if err != nil {
+		return false, err
+	}
+	err = bcrypt.CompareHashAndPassword([]byte(provided_cert_hash), cert_sha256)
+	if err != nil {
+		return false, nil
+	}
+	return true, nil
+}
+
 func srv_handle(conn net.Conn, self_cpids_dir string) {
 	var wg sync.WaitGroup
 	disconnect := func(session *yamux.Session, remote string) {
@@ -309,6 +378,23 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 	defer conn.Close()
 	remote := conn.RemoteAddr().String()
+
+	if is_file_exists(*tls_cert) {
+		hash_buf := make([]byte, 60)
+		n, err := conn.Read(hash_buf)
+		if err != nil {
+			log.Printf("[%s] error reading cert hash: %v", remote, err)
+			return
+		}
+		provided_cert_hash := string(hash_buf[:n])
+		is_valid_cert_hash, err := verify_cert_hash(provided_cert_hash, *tls_cert)
+		if err != nil || !is_valid_cert_hash {
+			log.Printf("[%s] invalid cert!", remote)
+			conn.Write([]byte("error\r"))
+			return
+		}
+		conn.Write([]byte("\r"))
+	}
 
 	session, err := yamux.Server(conn, nil)
 	if err != nil {
@@ -388,7 +474,21 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	}
 	if strings.HasPrefix(envs[last_env_num], "_SSRV_UENV=") {
 		uenv_vars := strings.Replace(envs[last_env_num], "_SSRV_UENV=", "", 1)
-		if uenv_vars != "all" {
+		if uenv_vars == "all" {
+			exec_cmd_envs = nil
+		} else if strings.HasPrefix(uenv_vars, "all-:") {
+			var exec_cmd_no_uenv []string
+			no_uenv_vars := strings.Split(strings.Replace(uenv_vars, "all-:", "", 1), ",")
+			for _, env := range exec_cmd_envs {
+				pair := strings.SplitN(env, "=", 2)
+				for _, no_uenv := range no_uenv_vars {
+					if pair[0] == no_uenv {
+						exec_cmd_no_uenv = append(exec_cmd_no_uenv, env)
+					}
+				}
+			}
+			exec_cmd_envs = exec_cmd_no_uenv
+		} else {
 			for _, uenv := range strings.Split(uenv_vars, ",") {
 				for num, env := range exec_cmd_envs {
 					pair := strings.SplitN(env, "=", 2)
@@ -397,8 +497,6 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 					}
 				}
 			}
-		} else {
-			exec_cmd_envs = nil
 		}
 		envs = envs[:last_env_num]
 		last_env_num -= 1
@@ -575,9 +673,30 @@ func server(proto, socket string) {
 		}
 	}
 
-	listener, err := net.Listen(proto, socket)
-	if err != nil {
-		log.Fatal(err)
+	var err error
+	var listener net.Listener
+	if is_file_exists(*tls_cert) && is_file_exists(*tls_key) {
+		*tls_key, _ = filepath.Abs(*tls_key)
+		*tls_cert, _ = filepath.Abs(*tls_cert)
+		cert, err := tls.LoadX509KeyPair(*tls_cert, *tls_key)
+		if err != nil {
+			log.Fatal(err)
+		}
+		tls_config := &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS13,
+			Certificates:       []tls.Certificate{cert},
+		}
+		listener, err = tls.Listen(proto, socket, tls_config)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Println("TLS encryption enabled")
+	} else {
+		listener, err = net.Listen(proto, socket)
+		if err != nil {
+			log.Fatal(err)
+		}
 	}
 
 	if proto == "unix" && is_file_exists(socket) {
@@ -623,10 +742,23 @@ func server(proto, socket string) {
 		for _, uenv := range strings.Split(*uenv_vars, ",") {
 			os.Unsetenv(uenv)
 		}
+	} else if strings.HasPrefix(*env_vars, "all-:") {
+		for _, uenv := range strings.Split(strings.Replace(*env_vars, "all-:", "", 1), ",") {
+			os.Unsetenv(uenv)
+		}
+	} else if strings.HasPrefix(*uenv_vars, "all-:") {
+		no_uenv_vars := strings.Split(strings.Replace(*uenv_vars, "all-:", "", 1), ",")
 		for _, env := range os.Environ() {
 			pair := strings.SplitN(env, "=", 2)
 			key := pair[0]
-			if strings.HasPrefix(key, "SSRV_") {
+			is_unset_env := true
+			for _, no_uenv := range no_uenv_vars {
+				if key == no_uenv {
+					is_unset_env = false
+					break
+				}
+			}
+			if is_unset_env {
 				os.Unsetenv(key)
 			}
 		}
@@ -686,6 +818,7 @@ func server(proto, socket string) {
 }
 
 func client(proto, socket string, exec_args []string) int {
+	var err error
 	var wg sync.WaitGroup
 
 	is_alloc_pty := true
@@ -698,9 +831,37 @@ func client(proto, socket string, exec_args []string) int {
 		is_alloc_pty = false
 	}
 
-	conn, err := net.Dial(proto, socket)
-	if err != nil {
-		log.Fatalf("connection error: %v", err)
+	var conn net.Conn
+	if is_file_exists(*tls_cert) {
+		tls_config := &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS13,
+		}
+		conn, err = tls.Dial(proto, socket, tls_config)
+		if err != nil {
+			log.Fatalf("TLS connection error: %v", err)
+		}
+		cert_hash, err := get_cert_hash(*tls_cert)
+		if err != nil {
+			log.Fatalf("failed to get cert hash: %v", err)
+		}
+		_, err = conn.Write([]byte(cert_hash))
+		if err != nil {
+			log.Fatalf("failed to send cert hash: %v", err)
+		}
+		status_reader := bufio.NewReader(conn)
+		status, err := status_reader.ReadString('\r')
+		if err != nil {
+			log.Fatalf("error reading hash status: %v", err)
+		}
+		if status == "error\r" {
+			log.Fatalf("invalid cert!")
+		}
+	} else {
+		conn, err = net.Dial(proto, socket)
+		if err != nil {
+			log.Fatalf("connection error: %v", err)
+		}
 	}
 	defer conn.Close()
 
@@ -761,13 +922,17 @@ func client(proto, socket string, exec_args []string) int {
 
 	var envs string
 	if *env_vars == "all" {
-		uenv_vars_pass := strings.Split(*uenv_vars, ",")
+		for _, env := range os.Environ() {
+			envs += env + "\n"
+		}
+	} else if strings.HasPrefix(*env_vars, "all-:") {
+		unset_env_vars := strings.Split(strings.Replace(*env_vars, "all-:", "", 1), ",")
 		for _, env := range os.Environ() {
 			pair := strings.SplitN(env, "=", 2)
 			key := pair[0]
 			is_add_env := true
-			for _, uenv_pass := range uenv_vars_pass {
-				if key == uenv_pass {
+			for _, unset_env := range unset_env_vars {
+				if key == unset_env {
 					is_add_env = false
 					break
 				}
@@ -780,15 +945,14 @@ func client(proto, socket string, exec_args []string) int {
 		if *env_vars != "TERM" {
 			*env_vars = fmt.Sprintf("TERM," + *env_vars)
 		}
-		env_vars_pass := strings.Split(*env_vars, ",")
-		for _, env := range env_vars_pass {
+		for _, env := range strings.Split(*env_vars, ",") {
 			if value, ok := os.LookupEnv(env); ok {
 				envs += env + "=" + value + "\n"
 			}
 		}
-		if len(*uenv_vars) != 0 {
-			envs += fmt.Sprintf("_SSRV_UENV=%s\n", *uenv_vars)
-		}
+	}
+	if len(*uenv_vars) != 0 {
+		envs += fmt.Sprintf("_SSRV_UENV=%s\n", *uenv_vars)
 	}
 	if len(*cwd) != 0 {
 		envs += fmt.Sprintf("_SSRV_CWD=%s\n", *cwd)
@@ -951,6 +1115,7 @@ func main() {
 	}
 
 	ssrv_env_vars_parse()
+	ssrv_env_vars_unset()
 
 	address := strings.Split(*socket_addr, ":")
 	if len(address) > 1 && is_valid_proto(address[0]) {

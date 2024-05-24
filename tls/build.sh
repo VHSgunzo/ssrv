@@ -36,7 +36,7 @@ for ARCH in "${ARCHS[@]}"
                 go mod vendor
                 tar -I 'zstd -T0 --ultra -22 --progress' --exclude build -l \
                 --exclude tls --exclude .git --exclude .github --exclude .gitignore \
-                -cf "$SRC_DIR/shellsrv-src-v${VERSION}.tar.zst" -C "$SRC_DIR" .
+                -cf "$SRC_DIR/ssrv-src-v${VERSION}.tar.zst" -C "$SRC_DIR" .
                 continue ;;
             i386|i686) GOARCH='386' ;;
             x86_64) GOARCH='amd64' ;;
@@ -50,7 +50,7 @@ for ARCH in "${ARCHS[@]}"
 
         echo "Build for ${ARCH}..."
         mkdir -p "build/$ARCH"
-        go build -trimpath -o "build/$ARCH/shellsrv" \
+        go build -trimpath -o "build/$ARCH/ssrv" \
             -ldflags "-X main.VERSION=$VERSION -s -w -buildid="
 
         if [ "$WITH_UPX" == 1 ] && command -v upx &>/dev/null
@@ -59,13 +59,13 @@ for ARCH in "${ARCHS[@]}"
                 upxdir="build/$ARCH/upx"
                 mkdir -p "$upxdir"
                 upx --force-overwrite -9 --best \
-                "build/$ARCH/shellsrv" -o "$upxdir/shellsrv"
+                "build/$ARCH/ssrv" -o "$upxdir/ssrv"
         fi
 
         if [ "$CREATE_RELEASE_ARCHIVES" == 1 ]
             then
                 echo "Archiving release ${ARCH}..."
                 tar -I 'zstd -T0 --ultra -22 --progress' -cf \
-                "$SRC_DIR/shellsrv-${ARCH}-v${VERSION}.tar.zst" -C "build/$ARCH" .
+                "$SRC_DIR/ssrv-${ARCH}-v${VERSION}.tar.zst" -C "build/$ARCH" .
         fi
 done
