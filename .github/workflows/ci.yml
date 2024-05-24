@@ -9,7 +9,7 @@ on:
 
 jobs:
   build_and_release:
-    name: shellsrv
+    name: ssrv
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -25,9 +25,9 @@ jobs:
 
       - name: Build
         run: >
-          sudo sh -c 'curl -L https://github.com/upx/upx/releases/download/v4.2.2/upx-4.2.2-amd64_linux.tar.xz -o /tmp/upx-4.2.2-amd64_linux.tar.xz && \
-                      tar -xvf /tmp/upx-4.2.2-amd64_linux.tar.xz -C /tmp/ && \
-                      mv -f /tmp/upx-4.2.2-amd64_linux/upx /bin/upx && \
+          sudo sh -c 'curl -L https://github.com/upx/upx/releases/download/v4.2.4/upx-4.2.4-amd64_linux.tar.xz -o /tmp/upx-4.2.4-amd64_linux.tar.xz && \
+                      tar -xvf /tmp/upx-4.2.4-amd64_linux.tar.xz -C /tmp/ && \
+                      mv -f /tmp/upx-4.2.4-amd64_linux/upx /bin/upx && \
                       chmod +x /bin/upx';
           env WITH_UPX=1 CREATE_RELEASE_ARCHIVES=1 sh -c './build.sh all && cd tls && ./build.sh all';
 
@@ -36,7 +36,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         with:
           files: |
-            shellsrv*.tar.zst
-            tls/shellsrv*.tar.zst
+            ssrv*.tar.zst
+            tls/ssrv*.tar.zst
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
