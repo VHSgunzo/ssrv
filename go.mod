@@ -1,4 +1,4 @@
-module github.com/VHSgunzo/shellsrv
+module github.com/VHSgunzo/ssrv
 
 go 1.21.6
 

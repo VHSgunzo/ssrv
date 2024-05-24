@@ -1,4 +1,4 @@
-module github.com/VHSgunzo/shellsrv/tls
+module github.com/VHSgunzo/ssrv/tls
 
 go 1.21.6
 
