@@ -29,6 +29,7 @@ cd "$SRC_DIR"
 export CGO_ENABLED=0
 for ARCH in "${ARCHS[@]}"
     do
+        unset GOOS
         case "$ARCH" in
             source)
                 echo "Create archive with source code..."
