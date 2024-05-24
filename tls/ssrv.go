@@ -273,7 +273,7 @@ func ssrv_env_vars_parse() {
 	}
 	if ssrv_socket, ok := os.LookupEnv("SSRV_SOCK"); ok &&
 		*socket_addr == UNIX_SOCKET {
-		flag.Set("socket", ssrv_socket)
+		flag.Set("sock", ssrv_socket)
 	}
 	if ssrv_cpids_dir, ok := os.LookupEnv("SSRV_CPIDS_DIR"); ok &&
 		*cpids_dir == CPIDS_DIR {
