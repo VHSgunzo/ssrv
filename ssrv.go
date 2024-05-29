@@ -28,7 +28,7 @@ import (
 	"golang.org/x/term"
 )
 
-var VERSION string = "HEAD"
+var VERSION string = "v0.2.5"
 
 const ENV_VARS = "TERM"
 const BINARY_NAME = "ssrv"
@@ -57,6 +57,8 @@ Environment variables:
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
     SSRV_CWD=/path/dir              Same as -cwd argument
+    SSRV_NO_EXEC=1                  Same as -N argument
+    SSRV_LPORTFW="1337:22,1111:21"  Same as -L argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
@@ -115,6 +117,14 @@ var pid_file = flag.String(
 var cwd = flag.String(
 	"cwd", "",
 	"Change the current working directory of the process/command.",
+)
+var no_exec = flag.Bool(
+	"N", false,
+	"Don't execute commands. (Use with port forwarding)",
+)
+var lportfw_list = flag.String(
+	"L", "",
+	"Comma separated list of remote port forwarding to local port <local_port:remote_port>",
 )
 
 type win_size struct {
@@ -252,6 +262,10 @@ func ssrv_env_vars_parse() {
 		!*nosep_cpids {
 		flag.Set("nosep-cpids", "true")
 	}
+	if is_env_var_eq("SSRV_NO_EXEC", "1") &&
+		!*no_exec {
+		flag.Set("N", "true")
+	}
 	if ssrv_env, ok := os.LookupEnv("SSRV_ENV"); ok &&
 		*env_vars == ENV_VARS {
 		flag.Set("env", ssrv_env)
@@ -276,6 +290,10 @@ func ssrv_env_vars_parse() {
 		*cwd == "" {
 		flag.Set("cwd", ssrv_cwd)
 	}
+	if ssrv_lportfw, ok := os.LookupEnv("SSRV_LPORTFW"); ok &&
+		*lportfw_list == "" {
+		flag.Set("L", ssrv_lportfw)
+	}
 }
 
 func child_pids_walk(pid int, wg *sync.WaitGroup, child_pids *[]int) {
@@ -299,6 +317,14 @@ func get_child_pids(pid int) []int {
 		return child_pids[i] < child_pids[j]
 	})
 	return child_pids
+}
+
+func is_valid_port(port string, min_port int) bool {
+	port_int, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return port_int >= min_port && port_int <= 65535
 }
 
 func is_pid_exist(pid int) bool {
@@ -327,6 +353,90 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	}
 	defer disconnect(session, remote)
 	log.Printf("[%s] [    CONNECT   ]", remote)
+
+	lportfw_channel, err := session.Accept()
+	if err != nil {
+		log.Printf("lportfw channel accept error: %v", err)
+		return
+	}
+	defer lportfw_channel.Close()
+	lportfw_reader := bufio.NewReader(lportfw_channel)
+	lportfw_data, err := lportfw_reader.ReadString('\r')
+	if err != nil {
+		log.Printf("[%s] failed to read port forwarding: %v", remote, err)
+		return
+	}
+	lportfw_data = lportfw_data[:len(lportfw_data)-1]
+	lportfw_tcp_handle := func(lportfw_tcp_stream net.Conn, lportfw string) {
+		defer lportfw_tcp_stream.Close()
+		forward_tcp_conn, err := net.Dial("tcp", ":"+lportfw)
+		if err != nil {
+			log.Printf("lport TCP forwarding error: %v", err)
+			return
+		}
+		defer forward_tcp_conn.Close()
+		go io.Copy(lportfw_tcp_stream, forward_tcp_conn)
+		io.Copy(forward_tcp_conn, lportfw_tcp_stream)
+	}
+	lportfw_tcp_forward := func() {
+		for {
+			lportfw_reader := bufio.NewReader(lportfw_channel)
+			lportfw, err := lportfw_reader.ReadString('\r')
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("[%s] failed to read TCP port forwarding: %v", remote, err)
+				}
+				break
+			}
+			lportfw = lportfw[:len(lportfw)-1]
+			lportfw_tcp_stream, err := session.AcceptStream()
+			if err != nil {
+				log.Printf("lport TCP forwarding stream accept error: %v", err)
+				return
+			}
+			go lportfw_tcp_handle(lportfw_tcp_stream, lportfw)
+		}
+	}
+	lportfw_udp_forward := func(lportfw_udp_stream net.Conn, lportfw string) {
+		defer lportfw_udp_stream.Close()
+		lportfw_udp_addr, _ := net.ResolveUDPAddr("udp", ":"+lportfw)
+		forward_udp_conn, err := net.DialUDP("udp", nil, lportfw_udp_addr)
+		if err != nil {
+			log.Printf("lport UDP forwarding error: %v", err)
+			return
+		}
+		defer forward_udp_conn.Close()
+		go io.Copy(lportfw_udp_stream, forward_udp_conn)
+		io.Copy(forward_udp_conn, lportfw_udp_stream)
+	}
+	no_exec := false
+	if len(lportfw_data) != 0 {
+		if strings.HasPrefix(lportfw_data, "_NO_EXEC_") {
+			lportfw_data = strings.Replace(lportfw_data, "_NO_EXEC_", "", 1)
+			no_exec = true
+		}
+		if len(lportfw_data) != 0 {
+			log.Printf("[%s] LPORTFW: %s", remote, lportfw_data)
+			go lportfw_tcp_forward()
+			for _, lportfw := range strings.Split(lportfw_data, ",") {
+				lportfw_udp_stream, err := session.AcceptStream()
+				if err != nil {
+					log.Printf("lport UDP forwarding stream accept error: %v", err)
+					return
+				}
+				go lportfw_udp_forward(lportfw_udp_stream, lportfw)
+			}
+		}
+	}
+
+	if no_exec {
+		for {
+			time.Sleep(time.Millisecond * 500)
+			if session.IsClosed() {
+				return
+			}
+		}
+	}
 
 	envs_channel, err := session.Accept()
 	if err != nil {
@@ -750,6 +860,149 @@ func client(proto, socket string, exec_args []string) int {
 	_, err = session.Ping()
 	if err != nil {
 		log.Fatalf("ping error: %v", err)
+	}
+
+	lportfw_channel, err := session.Open()
+	if err != nil {
+		log.Printf("lport forwarding channel open error: %v", err)
+	}
+	defer lportfw_channel.Close()
+	var lportfw_data string
+	if *no_exec {
+		lportfw_data = "_NO_EXEC_"
+	}
+	lportfw_tcp_conn_handle := func(lportfw_tcp_conn net.Conn, lportfw string) {
+		defer lportfw_tcp_conn.Close()
+		lportfw_channel.Write([]byte(lportfw + "\r"))
+		if err != nil {
+			return
+		}
+		lportfw_tcp_stream, err := session.OpenStream()
+		if err != nil {
+			log.Printf("lport TCP forwarding stream open error: %v", err)
+			return
+		}
+		defer lportfw_tcp_stream.Close()
+		go io.Copy(lportfw_tcp_conn, lportfw_tcp_stream)
+		io.Copy(lportfw_tcp_stream, lportfw_tcp_conn)
+	}
+	lportfw_tcp_handle := func(lportfw_tcp_listener net.Listener, lportfw string) {
+		defer lportfw_tcp_listener.Close()
+		for {
+			lportfw_tcp_conn, err := lportfw_tcp_listener.Accept()
+			if err != nil {
+				log.Printf("lport TCP forwarding accept error: %v", err)
+				continue
+			}
+			go lportfw_tcp_conn_handle(lportfw_tcp_conn, lportfw)
+		}
+	}
+	lportfw_udp_handle := func(lportfw_udp_listener *net.UDPConn, lportfw_udp_stream net.Conn) {
+		defer lportfw_udp_listener.Close()
+		defer lportfw_udp_stream.Close()
+		udp2tcp := make(chan []byte)
+		tcp2udp := make(chan []byte)
+		var remote_addr *net.UDPAddr
+		go func() {
+			for {
+				buf := make([]byte, 1024)
+				n, addr, err := lportfw_udp_listener.ReadFromUDP(buf)
+				if err != nil {
+					if err != io.EOF {
+						log.Printf("lport forwarding error reading from UDP: %s", err)
+					}
+					continue
+				}
+				remote_addr = addr
+				udp2tcp <- buf[:n]
+			}
+		}()
+		go func() {
+			for {
+				buf := make([]byte, 1024)
+				n, err := lportfw_udp_stream.Read(buf)
+				if err != nil {
+					if err != io.EOF {
+						log.Printf("lport forwarding error reading from TCP: %s", err)
+					}
+					return
+				}
+				tcp2udp <- buf[:n]
+			}
+		}()
+		for {
+			select {
+			case buf := <-udp2tcp:
+				_, err := lportfw_udp_stream.Write(buf)
+				if err != nil {
+					log.Printf("lport forwarding error writing to TCP: %s", err)
+					return
+				}
+			case buf := <-tcp2udp:
+				if remote_addr != nil {
+					_, err := lportfw_udp_listener.WriteToUDP(buf, remote_addr)
+					if err != nil {
+						log.Printf("lport forwarding error writing to UDP: %s", err)
+						return
+					}
+				}
+			}
+		}
+	}
+	if len(*lportfw_list) != 0 {
+		lportfw_num := 0
+		for _, lportfw_list := range strings.Split(*lportfw_list, ",") {
+			lportfws := strings.Split(lportfw_list, ":")
+			if len(lportfws) == 2 {
+				if !is_valid_port(lportfws[1], 1) {
+					log.Printf("lport forwarding error: invalid remote port!")
+					continue
+				}
+				lportfw_tcp_listener, err := net.Listen("tcp", ":"+lportfws[0])
+				if err != nil {
+					log.Printf("lport TCP forwarding error: %v", err)
+					continue
+				}
+				lportfw_udp_addr, _ := net.ResolveUDPAddr("udp", ":"+lportfws[0])
+				lportfw_udp_listener, err := net.ListenUDP("udp", lportfw_udp_addr)
+				if err != nil {
+					log.Printf("lport UDP forwarding error: %v", err)
+					lportfw_tcp_listener.Close()
+					continue
+				}
+				if lportfws[0] == "0" {
+					lportfw_addr := lportfw_tcp_listener.Addr().String()
+					lportfws_raddrs := strings.Split(conn.RemoteAddr().String(), ":")
+					lportfws_raddr := lportfws_raddrs[0] + ":" + lportfws[1]
+					log.Printf("lport forwarding: %s <- %s", lportfw_addr, lportfws_raddr)
+				}
+				if lportfw_num != 0 {
+					lportfw_data += ","
+				}
+				lportfw_data += lportfws[1]
+				lportfw_num += 1
+				go lportfw_tcp_handle(lportfw_tcp_listener, lportfws[1])
+
+				lportfw_udp_stream, err := session.OpenStream()
+				if err != nil {
+					log.Printf("lport UDP forwarding stream open error: %v", err)
+				}
+				go lportfw_udp_handle(lportfw_udp_listener, lportfw_udp_stream)
+			}
+		}
+	}
+	_, err = lportfw_channel.Write([]byte(lportfw_data + "\r"))
+	if err != nil {
+		log.Fatalf("failed to send lport forwarding: %v", err)
+	}
+
+	if *no_exec {
+		for {
+			time.Sleep(time.Millisecond * 500)
+			if session.IsClosed() {
+				os.Exit(0)
+			}
+		}
 	}
 
 	stdin := int(os.Stdin.Fd())

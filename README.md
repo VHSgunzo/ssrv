@@ -10,6 +10,7 @@ Key features include:
 - **Shims for the server side binaries**: If there's a process that you always want to execute on the server side system, you can
 create a symlink to it somewhere in your `$PATH` and it'll always be executed through `ssrv`.
 - **Stdin Pipe**: Sends data to the command's standard input using a pipe.
+- **Port Forwarding** Forward remote TCP and UDP ports to local ports
 
 `ssrv` is ideal for system administrators and developers who require a solution for executing commands remotely or locally with  listening on unix sockets. By default, the server and the client communicate via an abstract unix socket `@ssrv`. Its configurability and support for multiple concurrent sessions make it suitable for complex network operations and management tasks.
 
@@ -31,6 +32,9 @@ go install github.com/VHSgunzo/ssrv@latest
 If COMMAND is not passed, spawn a $SHELL on the server side.
 
 Accepted options:
+    -L string
+        Comma separated list of remote port forwarding to local port <local_port:remote_port>
+    -N  Don't execute commands. (Use with port forwarding)
     -cpids-dir string
         A directory on the server side for storing a list of client PIDs. (default "/tmp/ssrv$EUID")
     -cwd string
@@ -66,6 +70,8 @@ Environment variables:
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
     SSRV_CWD=/path/dir              Same as -cwd argument
+    SSRV_NO_EXEC=1                  Same as -N argument
+    SSRV_LPORTFW="1337:22,1111:21"  Same as -L argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
