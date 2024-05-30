@@ -4,7 +4,7 @@
 Key features include:
 
 - **Multiplexed Connections**: Allows handling multiple clients simultaneously, ensuring robustness and scalability.
-- **Customizable Environment Variables**: Users can pass a comma-separated list of environment variables to the server side process, providing fine-grained control over the session environment.
+- **Customizable Environment Variables**: Users can pass a comma-separated list of environment variables to the server side process, providing fine-grained control over the session environment. And with the ability to specify exceptions when passing/unsetting all env vars: `-env all-:MY_VAR,MY_VAR1 -uenv all-:MY_VAR2,MY_VAR3`
 - **Pseudo-Terminal Allocation**: Offers options to force or avoid allocating a pseudo-terminal, accommodating various command behaviors and client requirements.
 - **Dynamically Resizing Pseudo-Terminal**: Dynamically changing the size of the pseudo-terminal along with the size of the window.
 - **Command Execution**: When no command is passed, the default behavior is to spawn a shell on the server side, offering full shell functionality to the client. The remote command exit code is also returned to the client.
@@ -12,8 +12,8 @@ Key features include:
 create a symlink to it somewhere in your `$PATH` and it'll always be executed through `ssrv`.
 - **Stdin Pipe**: Sends data to the command's standard input using a pipe.
 - **Separate Stdout and Stderr**: The client receives stdout and stderr errors in a separate channels.
-- **Port Forwarding**: Forward remote TCP and UDP ports to local ports.
-- **BG Control**: Client background processes control (without suspending tty output). And sending syscall.Signal's to client pids on server side if running without allocation pty.
+- **Port Forwarding**: Forward remote `TCP` and `UDP` ports to local ports.
+- **BG Control**: Client background processes control (without suspending tty output). And sending `syscall.Signal's` to client pids on server side if running without allocation pty.
 - **Exit Code Forwarding**: Return the exit code to the client.
 - **Setting CWD Path**: Changing the current working directory of the process/command.
 
