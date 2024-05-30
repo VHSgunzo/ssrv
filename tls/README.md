@@ -6,11 +6,17 @@ Key features include:
 - **Multiplexed Connections**: Allows handling multiple clients simultaneously, ensuring robustness and scalability.
 - **Customizable Environment Variables**: Users can pass a comma-separated list of environment variables to the server side process, providing fine-grained control over the session environment.
 - **Pseudo-Terminal Allocation**: Offers options to force or avoid allocating a pseudo-terminal, accommodating various command behaviors and client requirements.
+- **Dynamically Resizing Pseudo-Terminal**: Dynamically changing the size of the pseudo-terminal along with the size of the window.
 - **Command Execution**: When no command is passed, the default behavior is to spawn a shell on the server side, offering full shell functionality to the client. The remote command exit code is also returned to the client.
 - **Shims for the server side binaries**: If there's a process that you always want to execute on the server side system, you can
 create a symlink to it somewhere in your `$PATH` and it'll always be executed through `ssrv`.
 - **Stdin Pipe**: Sends data to the command's standard input using a pipe.
-- **Port Forwarding** Forward remote TCP and UDP ports to local ports
+- **Separate Stdout and Stderr**: The client receives stdout and stderr errors in a separate channels.
+- **Port Forwarding**: Forward remote TCP and UDP ports to local ports.
+- **BG Control**: Client background processes control (without suspending tty output). And sending syscall.Signal's to client pids on server side if running without allocation pty.
+- **Exit Code Forwarding**: Return the exit code to the client.
+- **Setting CWD Path**: Changing the current working directory of the process/command.
+- **TLS Encryption**: The ability to enable TLS encryption of connections.
 
 `ssrv` is ideal for system administrators and developers who require a solution for executing commands remotely or locally with  listening on unix sockets. By default, the server and the client communicate via an abstract unix socket `@ssrv`. Its configurability and support for multiple concurrent sessions make it suitable for complex network operations and management tasks.
 
