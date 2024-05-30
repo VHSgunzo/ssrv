@@ -11,7 +11,7 @@ Key features include:
 - **Shims for the server side binaries**: If there's a process that you always want to execute on the server side system, you can
 create a symlink to it somewhere in your `$PATH` and it'll always be executed through `ssrv`.
 - **Stdin Pipe**: Sends data to the command's standard input using a pipe.
-- **Separate Stdout and Stderr**: The client receives stdout and stderr errors in a separate channels.
+- **Separate Stdout and Stderr**: The client receives stdout and stderr in a separate channels.
 - **Port Forwarding**: Forward remote `TCP` and `UDP` ports to local ports.
 - **BG Control**: Client background processes control (without suspending tty output). And sending `syscall.Signal's` to client pids on server side if running without allocation pty.
 - **Exit Code Forwarding**: Return the exit code to the client.
