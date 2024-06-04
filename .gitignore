@@ -8,3 +8,4 @@ tls/shellsrv-upx
 tls/vendor
 tls/build
 tls/*.tar.zst
+_ssrv.go

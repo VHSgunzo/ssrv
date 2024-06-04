@@ -88,7 +88,7 @@ Environment variables:
     SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
     SSRV_CWD=/path/dir              Same as -cwd argument
     SSRV_NO_EXEC=1                  Same as -N argument
-    SSRV_LPORTFW="1337:22,1111:21"  Same as -L argument
+    SSRV_LPORTFW="22:22,53:53/udp"  Same as -L argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
