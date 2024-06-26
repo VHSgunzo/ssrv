@@ -13,6 +13,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -28,12 +29,15 @@ import (
 	"golang.org/x/term"
 )
 
-var VERSION string = "v0.2.7"
+var VERSION string = "v0.2.6"
 
 const ENV_VARS = "TERM"
 const BINARY_NAME = "ssrv"
 const UNIX_SOCKET = "unix:@ssrv"
+const UDP_BUFSIZE = 4096
+const UDP_DEADLINE_TIMEOUT = time.Second * 2
 
+var is_gc_running = false
 var CPIDS_DIR = fmt.Sprint("/tmp/ssrv", syscall.Geteuid())
 
 const USAGE_PREAMBLE = `Server usage: %[1]s -srv [-sock tcp:1337] [-env all]
@@ -57,6 +61,8 @@ Environment variables:
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
     SSRV_CWD=/path/dir              Same as -cwd argument
+    SSRV_NO_EXEC=1                  Same as -N argument
+    SSRV_LPORTFW="22:22,53:53/udp"  Same as -L argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
@@ -115,6 +121,14 @@ var pid_file = flag.String(
 var cwd = flag.String(
 	"cwd", "",
 	"Change the current working directory of the process/command.",
+)
+var no_exec = flag.Bool(
+	"N", false,
+	"Don't execute commands. (Use with port forwarding)",
+)
+var lportfw_list = flag.String(
+	"L", "",
+	"Comma separated list of remote port forwarding to local port <local_port:remote_port>",
 )
 
 type win_size struct {
@@ -249,6 +263,10 @@ func ssrv_env_vars_parse() {
 		!*nosep_cpids {
 		flag.Set("nosep-cpids", "true")
 	}
+	if is_env_var_eq("SSRV_NO_EXEC", "1") &&
+		!*no_exec {
+		flag.Set("N", "true")
+	}
 	if ssrv_env, ok := os.LookupEnv("SSRV_ENV"); ok &&
 		*env_vars == ENV_VARS {
 		flag.Set("env", ssrv_env)
@@ -272,6 +290,10 @@ func ssrv_env_vars_parse() {
 	if ssrv_cwd, ok := os.LookupEnv("SSRV_CWD"); ok &&
 		*cwd == "" {
 		flag.Set("cwd", ssrv_cwd)
+	}
+	if ssrv_lportfw, ok := os.LookupEnv("SSRV_LPORTFW"); ok &&
+		*lportfw_list == "" {
+		flag.Set("L", ssrv_lportfw)
 	}
 }
 
@@ -298,6 +320,14 @@ func get_child_pids(pid int) []int {
 	return child_pids
 }
 
+func is_valid_port(port string, min_port int) bool {
+	port_int, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	return port_int >= min_port && port_int <= 65535
+}
+
 func is_pid_exist(pid int) bool {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
@@ -308,6 +338,7 @@ func is_pid_exist(pid int) bool {
 }
 
 func srv_handle(conn net.Conn, self_cpids_dir string) {
+	var mu sync.Mutex
 	var wg sync.WaitGroup
 	disconnect := func(session *yamux.Session, remote string) {
 		session.Close()
@@ -324,6 +355,191 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	}
 	defer disconnect(session, remote)
 	log.Printf("[%s] [    CONNECT   ]", remote)
+
+	portfw_channel, err := session.Accept()
+	if err != nil {
+		log.Printf("portfw channel accept error: %v", err)
+		return
+	}
+	defer portfw_channel.Close()
+	portfw_reader := bufio.NewReader(portfw_channel)
+	portfw_data, err := portfw_reader.ReadString('\r')
+	if err != nil {
+		log.Printf("[%s] failed to read lportfw TCP data: %v", remote, err)
+		return
+	}
+	portfw_data = portfw_data[:len(portfw_data)-1]
+	portfw_channel.Close()
+
+	lportfw_tcp_handle := func(lportfw_tcp_stream *yamux.Stream, forward_tcp_conn net.Conn) {
+		defer func() {
+			lportfw_tcp_stream.Close()
+			forward_tcp_conn.Close()
+		}()
+		done := make(chan error, 2)
+		go func() {
+			_, err := io.Copy(lportfw_tcp_stream, forward_tcp_conn)
+			done <- err
+		}()
+		go func() {
+			_, err := io.Copy(forward_tcp_conn, lportfw_tcp_stream)
+			done <- err
+		}()
+		err = <-done
+		if err != nil {
+			return
+		}
+		lportfw_tcp_stream.Close()
+		forward_tcp_conn.Close()
+		<-done
+	}
+	lportfw_tcp_forward := func(lportfw_tcp_channel net.Conn, lportfw string) {
+		defer lportfw_tcp_channel.Close()
+		buf := make([]byte, 1)
+		for {
+			_, err := lportfw_tcp_channel.Read(buf)
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("[%s] failed to read lportfw TCP: %v", remote, err)
+				}
+				break
+			}
+			lportfw_tcp_stream, err := session.AcceptStream()
+			if err != nil {
+				log.Printf("lportfw TCP stream accept error: %v", err)
+				return
+			}
+			forward_tcp_conn, err := net.Dial("tcp", ":"+lportfw)
+			if err != nil {
+				return
+			}
+			go lportfw_tcp_handle(lportfw_tcp_stream, forward_tcp_conn)
+		}
+	}
+
+	lportfw_udp_handle := func(lportfw_udp_stream *yamux.Stream, addr_str string, addr_udp_conns map[string]*net.UDPConn) {
+		mu.Lock()
+		forward_udp_conn := addr_udp_conns[addr_str]
+		mu.Unlock()
+		defer func() {
+			mu.Lock()
+			delete(addr_udp_conns, addr_str)
+			if lportfw_udp_stream != nil {
+				lportfw_udp_stream.Close()
+			}
+			if forward_udp_conn != nil {
+				forward_udp_conn.Close()
+			}
+			mu.Unlock()
+		}()
+		if forward_udp_conn == nil || lportfw_udp_stream == nil {
+			return
+		}
+		done := make(chan error, 2)
+		udpcp := func(dst net.Conn, src net.Conn) {
+			_, err := io.Copy(dst, src)
+			if err != nil {
+				done <- err
+			}
+			done <- nil
+		}
+		go udpcp(forward_udp_conn, lportfw_udp_stream)
+		go udpcp(lportfw_udp_stream, forward_udp_conn)
+		err = <-done
+		if err != nil {
+			if strings.Contains(err.Error(), "connection refused") {
+				lportfw_udp_stream.Write([]byte("connection refused"))
+			}
+			return
+		}
+		lportfw_udp_stream.Close()
+		forward_udp_conn.Close()
+		<-done
+	}
+	lportfw_udp_forward := func(lportfw_udp_channel net.Conn, lportfw string) {
+		defer lportfw_udp_channel.Close()
+		addr_udp_conns := make(map[string]*net.UDPConn)
+		lportfw_udp_addr, _ := net.ResolveUDPAddr("udp", ":"+lportfw)
+		addr_reader := bufio.NewReader(lportfw_udp_channel)
+		for {
+			addr_str, err := addr_reader.ReadString('\r')
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("[%s] failed to read lportfw UDP: %v", remote, err)
+				}
+				return
+			}
+			addr_str = addr_str[:len(addr_str)-1]
+			lportfw_udp_stream, err := session.AcceptStream()
+			if err != nil {
+				log.Printf("lportfw UDP stream accept error: %v", err)
+				return
+			}
+			lportfw_udp_stream.SetReadDeadline(time.Now().Add(UDP_DEADLINE_TIMEOUT))
+			mu.Lock()
+			_, exists := addr_udp_conns[addr_str]
+			if !exists {
+				forward_udp_conn, err := net.DialUDP("udp", nil, lportfw_udp_addr)
+				if err != nil {
+					log.Printf("lportfw UDP error: %v", err)
+					mu.Unlock()
+					return
+				}
+				forward_udp_conn.SetReadBuffer(UDP_BUFSIZE)
+				forward_udp_conn.SetWriteBuffer(UDP_BUFSIZE)
+				addr_udp_conns[addr_str] = forward_udp_conn
+			}
+			go lportfw_udp_handle(lportfw_udp_stream, addr_str, addr_udp_conns)
+			mu.Unlock()
+		}
+	}
+
+	no_exec := false
+	if len(portfw_data) != 0 {
+		if strings.HasPrefix(portfw_data, "_NO_EXEC_") {
+			portfw_data = strings.Replace(portfw_data, "_NO_EXEC_", "", 1)
+			no_exec = true
+		}
+		if len(portfw_data) != 0 {
+			if strings.HasPrefix(portfw_data, "LPORTFW_TCP:") {
+				portfw_data = strings.Replace(portfw_data, "LPORTFW_TCP:", "", 1)
+				log.Printf("[%s] LPORTFW TCP: %s", remote, portfw_data)
+				lportfw_tcp_channel, err := session.Accept()
+				if err != nil {
+					log.Printf("lportfw TCP channel accept error: %v", err)
+					return
+				}
+				go lportfw_tcp_forward(lportfw_tcp_channel, portfw_data)
+			} else if strings.HasPrefix(portfw_data, "LPORTFW_UDP:") {
+				portfw_data = strings.Replace(portfw_data, "LPORTFW_UDP:", "", 1)
+				log.Printf("[%s] LPORTFW UDP: %s", remote, portfw_data)
+				lportfw_udp_channel, err := session.Accept()
+				if err != nil {
+					log.Printf("lportfw UDP channel accept error: %v", err)
+					return
+				}
+				go lportfw_udp_forward(lportfw_udp_channel, portfw_data)
+				if !is_gc_running {
+					is_gc_running = true
+					go func() {
+						for {
+							time.Sleep(UDP_DEADLINE_TIMEOUT + 1)
+							runtime.GC()
+						}
+					}()
+				}
+			}
+		}
+	}
+
+	if no_exec {
+		for {
+			time.Sleep(time.Millisecond * 500)
+			if session.IsClosed() {
+				return
+			}
+		}
+	}
 
 	envs_channel, err := session.Accept()
 	if err != nil {
@@ -718,7 +934,9 @@ func server(proto, socket string) {
 }
 
 func client(proto, socket string, exec_args []string) int {
+	var err error
 	var wg sync.WaitGroup
+	var sessions []*yamux.Session
 
 	is_alloc_pty := true
 	if len(exec_args) != 0 {
@@ -730,24 +948,270 @@ func client(proto, socket string, exec_args []string) int {
 		is_alloc_pty = false
 	}
 
-	conn, err := net.Dial(proto, socket)
-	if err != nil {
-		log.Fatalf("connection error: %v", err)
+	noexec_wait := func() {
+		if *no_exec && len(sessions) != 0 {
+			for {
+				time.Sleep(time.Millisecond * 500)
+				for _, session := range sessions {
+					if session.IsClosed() {
+						os.Exit(0)
+					}
+				}
+			}
+		}
 	}
-	defer conn.Close()
 
-	yamux_config := yamux.DefaultConfig()
-	yamux_config.StreamOpenTimeout = 0
-	session, err := yamux.Client(conn, yamux_config)
-	if err != nil {
-		log.Fatalf("session error: %v", err)
+	new_conn_session := func() (net.Conn, *yamux.Session) {
+		conn, err := net.Dial(proto, socket)
+		if err != nil {
+			log.Fatalf("connection error: %v", err)
+		}
+		yamux_config := yamux.DefaultConfig()
+		yamux_config.StreamOpenTimeout = 0
+		session, err := yamux.Client(conn, yamux_config)
+		if err != nil {
+			log.Fatalf("session error: %v", err)
+		}
+		_, err = session.Ping()
+		if err != nil {
+			log.Fatalf("ping error: %v", err)
+		}
+		sessions = append(sessions, session)
+		return conn, session
 	}
-	defer session.Close()
 
-	_, err = session.Ping()
-	if err != nil {
-		log.Fatalf("ping error: %v", err)
+	lportfw_tcp_conn_handle := func(lportfw_tcp_conn net.Conn, lportfw_tcp_stream *yamux.Stream) {
+		defer func() {
+			lportfw_tcp_stream.Close()
+			lportfw_tcp_conn.Close()
+		}()
+		done := make(chan error, 2)
+		go func() {
+			_, err := io.Copy(lportfw_tcp_stream, lportfw_tcp_conn)
+			done <- err
+		}()
+		go func() {
+			_, err := io.Copy(lportfw_tcp_conn, lportfw_tcp_stream)
+			done <- err
+		}()
+		err = <-done
+		if err != nil {
+			return
+		}
+		lportfw_tcp_stream.Close()
+		lportfw_tcp_conn.Close()
+		<-done
 	}
+	lportfw_tcp_handle := func(session *yamux.Session, lportfw_tcp_listener net.Listener, lportfw_tcp_channel net.Conn) {
+		defer func() {
+			lportfw_tcp_channel.Close()
+			session.Close()
+			lportfw_tcp_listener.Close()
+		}()
+		for {
+			lportfw_tcp_conn, err := lportfw_tcp_listener.Accept()
+			if err != nil {
+				log.Printf("lportfw TCP accept error: %v", err)
+				break
+			}
+			lportfw_tcp_channel.Write([]byte("0"))
+			lportfw_tcp_stream, err := session.OpenStream()
+			if err != nil {
+				log.Printf("lportfw TCP stream open error: %v", err)
+				break
+			}
+			go lportfw_tcp_conn_handle(lportfw_tcp_conn, lportfw_tcp_stream)
+		}
+	}
+
+	lportfw_udp_conn_handle := func(lportfw_udp_listener *net.UDPConn, lportfw_udp_stream *yamux.Stream, addr *net.UDPAddr, addr_chan chan []byte) {
+		err_chan := make(chan error, 1)
+		tcp2udp_chan := make(chan []byte, UDP_BUFSIZE)
+		defer func() {
+			close(addr_chan)
+			close(tcp2udp_chan)
+			lportfw_udp_stream.Close()
+		}()
+		go func() {
+			buf := make([]byte, UDP_BUFSIZE)
+			for {
+				n, err := lportfw_udp_stream.Read(buf)
+				if err != nil {
+					err_chan <- err
+					close(err_chan)
+					break
+				}
+				tcp2udp_chan <- buf[:n]
+			}
+		}()
+		for {
+			select {
+			case buf := <-addr_chan:
+				_, err := lportfw_udp_stream.Write(buf)
+				if err != nil {
+					log.Printf("lportfw UDP error writing to TCP: %s", err)
+					return
+				}
+			case buf := <-tcp2udp_chan:
+				if string(buf) == "connection refused" {
+					lportfw_udp_listener.WriteToUDP(nil, addr)
+					return
+				}
+				_, err := lportfw_udp_listener.WriteToUDP(buf, addr)
+				if err != nil {
+					log.Printf("lportfw UDP error writing to UDP: %s", err)
+					return
+				}
+			case err := <-err_chan:
+				if err != nil {
+					lportfw_udp_listener.WriteToUDP(nil, addr)
+					return
+				}
+			}
+		}
+	}
+	lportfw_udp_handle := func(session *yamux.Session, lportfw_udp_listener *net.UDPConn, lportfw_udp_channel net.Conn) {
+		defer func() {
+			lportfw_udp_channel.Close()
+			session.Close()
+			lportfw_udp_listener.Close()
+		}()
+		for {
+			buf := make([]byte, UDP_BUFSIZE)
+			n, addr, err := lportfw_udp_listener.ReadFromUDP(buf)
+			if err != nil {
+				if err != io.EOF {
+					log.Printf("lportfw UDP error reading from UDP: %s", err)
+				}
+				break
+			}
+			lportfw_udp_channel.Write([]byte(addr.String() + "\r"))
+			lportfw_udp_stream, err := session.OpenStream()
+			if err != nil {
+				log.Printf("lportfw UDP stream open error: %v", err)
+				break
+			}
+			lportfw_udp_stream.SetReadDeadline(time.Now().Add(UDP_DEADLINE_TIMEOUT))
+			addr_chan := make(chan []byte, UDP_BUFSIZE)
+			go lportfw_udp_conn_handle(lportfw_udp_listener, lportfw_udp_stream, addr, addr_chan)
+			addr_chan <- buf[:n]
+			time.Sleep(time.Millisecond * 1)
+		}
+	}
+
+	if len(*lportfw_list) != 0 {
+		for _, lportfw_list := range strings.Split(*lportfw_list, ",") {
+			is_lportfw_udp := false
+			lportfws := strings.Split(lportfw_list, ":")
+			if len(lportfws) == 2 {
+				lportfw_local := lportfws[0]
+				lportfw_remote := strings.ToLower(lportfws[1])
+				if strings.HasSuffix(lportfw_remote, "/udp") {
+					is_lportfw_udp = true
+					lportfw_remote = strings.Replace(lportfw_remote, "/udp", "", 1)
+				}
+				if !is_valid_port(lportfw_remote, 1) {
+					log.Printf("lportfw error: invalid remote port %s", lportfw_remote)
+					continue
+				}
+				lportfw_data := "_NO_EXEC_"
+				var conn net.Conn
+				var session *yamux.Session
+				var lportfw_tcp_listener net.Listener
+				var lportfw_udp_listener *net.UDPConn
+				if !is_lportfw_udp {
+					lportfw_tcp_listener, err = net.Listen("tcp", ":"+lportfw_local)
+					if err != nil {
+						log.Printf("lportfw TCP error: %v", err)
+						continue
+					}
+					lportfw_data += "LPORTFW_TCP:" + lportfw_remote
+					conn, session = new_conn_session()
+				} else {
+					lportfw_udp_addr, _ := net.ResolveUDPAddr("udp", ":"+lportfw_local)
+					lportfw_udp_listener, err = net.ListenUDP("udp", lportfw_udp_addr)
+					if err != nil {
+						log.Printf("lportfw UDP error: %v", err)
+						continue
+					}
+					lportfw_udp_listener.SetReadBuffer(UDP_BUFSIZE)
+					lportfw_udp_listener.SetWriteBuffer(UDP_BUFSIZE)
+					lportfw_data += "LPORTFW_UDP:" + lportfw_remote
+					conn, session = new_conn_session()
+				}
+				defer conn.Close()
+				if lportfw_local == "0" {
+					lportfws_raddrs := strings.Split(conn.RemoteAddr().String(), ":")
+					lportfws_raddr := lportfws_raddrs[0] + ":" + lportfw_remote
+					if !is_lportfw_udp {
+						lportfw_tcp_addr := lportfw_tcp_listener.Addr().String()
+						log.Printf("LPORTFW TCP: %s <- %s", lportfw_tcp_addr, lportfws_raddr)
+					} else {
+						lportfw_udp_addr := lportfw_udp_listener.LocalAddr().String()
+						log.Printf("LPORTFW UDP: %s <- %s", lportfw_udp_addr, lportfws_raddr)
+					}
+				}
+				portfw_channel, err := session.Open()
+				if err != nil {
+					log.Printf("port forwarding channel open error: %v", err)
+				}
+				defer portfw_channel.Close()
+				_, err = portfw_channel.Write([]byte(lportfw_data + "\r"))
+				if err != nil {
+					log.Fatalf("failed to send lportfw TCP data: %v", err)
+				}
+				portfw_channel.Close()
+
+				if !is_lportfw_udp {
+					lportfw_tcp_channel, err := session.Open()
+					if err != nil {
+						log.Printf("lportfw TCP channel open error: %v", err)
+						continue
+					}
+					go lportfw_tcp_handle(session, lportfw_tcp_listener, lportfw_tcp_channel)
+				} else {
+					lportfw_udp_channel, err := session.Open()
+					if err != nil {
+						log.Printf("lportfw UDP channel open error: %v", err)
+						continue
+					}
+					go lportfw_udp_handle(session, lportfw_udp_listener, lportfw_udp_channel)
+					if !is_gc_running {
+						is_gc_running = true
+						go func() {
+							for {
+								time.Sleep(UDP_DEADLINE_TIMEOUT + 1)
+								runtime.GC()
+							}
+						}()
+					}
+				}
+			}
+		}
+		noexec_wait()
+	}
+
+	conn, session := new_conn_session()
+	defer func() {
+		session.Close()
+		conn.Close()
+	}()
+
+	var noexec_data string
+	if *no_exec {
+		noexec_data = "_NO_EXEC_"
+	}
+	noexec_channel, err := session.Open()
+	if err != nil {
+		log.Printf("noexec channel open error: %v", err)
+	}
+	defer noexec_channel.Close()
+	_, err = noexec_channel.Write([]byte(noexec_data + "\r"))
+	if err != nil {
+		log.Fatalf("failed to send noexec data: %v", err)
+	}
+	noexec_channel.Close()
+	noexec_wait()
 
 	stdin := int(os.Stdin.Fd())
 	is_stdin_term := false
@@ -977,6 +1441,10 @@ func client(proto, socket string, exec_args []string) int {
 }
 
 func main() {
+	// debug.SetGCPercent(1)
+	// debug.SetMemoryLimit(1073741824)
+	// debug.SetMemoryLimit(268435456)
+
 	var exec_args []string
 	self_basename := path.Base(os.Args[0])
 	if self_basename != BINARY_NAME {

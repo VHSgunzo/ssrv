@@ -12,6 +12,7 @@ Key features include:
 create a symlink to it somewhere in your `$PATH` and it'll always be executed through `ssrv`.
 - **Stdin Pipe**: Sends data to the command's standard input using a pipe.
 - **Separate Stdout and Stderr**: The client receives stdout and stderr in a separate channels.
+- **Port Forwarding**: Forward remote `TCP` and `UDP` ports to local ports.
 - **BG Control**: Client background processes control (without suspending tty output). And sending `syscall.Signal's` to client pids on server side if running without allocation pty.
 - **Exit Code Forwarding**: Return the exit code to the client.
 - **Setting CWD Path**: Changing the current working directory of the process/command.
@@ -42,6 +43,9 @@ cd ssrv/tls
 If COMMAND is not passed, spawn a $SHELL on the server side.
 
 Accepted options:
+    -L string
+        Comma separated list of remote port forwarding to local port <local_port:remote_port>
+    -N  Don't execute commands. (Use with port forwarding)
     -cpids-dir string
         A directory on the server side for storing a list of client PIDs. (default "/tmp/ssrv$EUID"))
     -cwd string
@@ -83,6 +87,8 @@ Environment variables:
     SSRV_NOSEP_CPIDS=1              Same as -nosep-cpids argument
     SSRV_PID_FILE=/path/ssrv.pid    Same as -pid-file argument
     SSRV_CWD=/path/dir              Same as -cwd argument
+    SSRV_NO_EXEC=1                  Same as -N argument
+    SSRV_LPORTFW="22:22,53:53/udp"  Same as -L argument
     SHELL="/bin/bash"               Assigns a default shell (on the server side)
 
 --
