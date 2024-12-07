@@ -32,7 +32,7 @@ import (
 	"golang.org/x/term"
 )
 
-var VERSION string = "v0.2.8"
+var VERSION string = "v0.2.9"
 
 const ENV_VARS = "TERM"
 const TLS_KEY = "key.pem"
@@ -414,7 +414,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		return
 	}
 	envs_str = envs_str[:len(envs_str)-1]
-	envs := strings.Split(envs_str, "\n")
+	envs := strings.Split(envs_str, "%&&%")
 
 	is_alloc_pty := true
 	var stdin_channel net.Conn
@@ -477,7 +477,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	if len(cmd_str) == 0 {
 		cmd_str = get_shell()
 	}
-	cmd := strings.Split(cmd_str, "\n")
+	cmd := strings.Split(cmd_str, "%&&%")
 	exec_cmd := exec.Command(cmd[0], cmd[1:]...)
 
 	exec_cmd_envs := os.Environ()
@@ -521,8 +521,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 			if len(pair) == 2 {
 				key := pair[0]
 				value = pair[1]
-				if strings.HasPrefix(key, "PWD") &&
-					is_dir_exists(value) {
+				if key == "PWD" && is_dir_exists(value) {
 					exec_cmd.Dir = value
 				}
 			}
@@ -542,7 +541,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	}
 	if err != nil {
 		log.Printf("[%s] cmd error: %v", remote, err)
-		_, err = command_channel.Write([]byte(fmt.Sprint("cmd error: " + err.Error() + "\r\n")))
+		_, err = command_channel.Write([]byte(fmt.Sprint("cmd error: " + err.Error() + "\r")))
 		if err != nil {
 			log.Printf("[%s] failed to send cmd error: %v", remote, err)
 		}
@@ -660,7 +659,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	exit_code := strconv.Itoa(state.ExitCode())
 	log.Printf("[%s] PID: %d -> EXIT: %s", remote, cmd_pid, exit_code)
 
-	_, err = command_channel.Write([]byte(fmt.Sprint(exit_code + "\r\n")))
+	_, err = command_channel.Write([]byte(fmt.Sprint(exit_code + "\r")))
 	if err != nil {
 		log.Printf("[%s] PID: %d -> error sending exit code: %v", remote, cmd_pid, err)
 		return
@@ -932,7 +931,7 @@ func client(proto, socket string, exec_args []string) int {
 	var envs string
 	if *env_vars == "all" {
 		for _, env := range os.Environ() {
-			envs += env + "\n"
+			envs += env + "%&&%"
 		}
 	} else if strings.HasPrefix(*env_vars, "all-:") {
 		unset_env_vars := strings.Split(strings.Replace(*env_vars, "all-:", "", 1), ",")
@@ -947,7 +946,7 @@ func client(proto, socket string, exec_args []string) int {
 				}
 			}
 			if is_add_env {
-				envs += env + "\n"
+				envs += env + "%&&%"
 			}
 		}
 	} else {
@@ -956,20 +955,20 @@ func client(proto, socket string, exec_args []string) int {
 		}
 		for _, env := range strings.Split(*env_vars, ",") {
 			if value, ok := os.LookupEnv(env); ok {
-				envs += env + "=" + value + "\n"
+				envs += env + "=" + value + "%&&%"
 			}
 		}
 	}
 	if len(*uenv_vars) != 0 {
-		envs += fmt.Sprintf("_SSRV_UENV=%s\n", *uenv_vars)
+		envs += fmt.Sprintf("_SSRV_UENV=%s", *uenv_vars) + "%&&%"
 	}
 	if len(*cwd) != 0 {
-		envs += fmt.Sprintf("_SSRV_CWD=%s\n", *cwd)
+		envs += fmt.Sprintf("_SSRV_CWD=%s", *cwd) + "%&&%"
 	}
 	if !is_alloc_pty {
 		envs += "_NO_PTY_"
 	}
-	envs += "\r\n"
+	envs += "\r"
 	envs_channel, err := session.Open()
 	if err != nil {
 		log.Fatalf("environment channel open error: %v", err)
@@ -1001,7 +1000,7 @@ func client(proto, socket string, exec_args []string) int {
 	if err != nil {
 		log.Fatalf("command channel open error: %v", err)
 	}
-	command := strings.Join(exec_args, "\n") + "\r\n"
+	command := strings.Join(exec_args, "%&&%") + "\r"
 	_, err = command_channel.Write([]byte(command))
 	if err != nil {
 		log.Fatalf("failed to send command: %v", err)
