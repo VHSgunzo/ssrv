@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -31,7 +32,7 @@ import (
 	"golang.org/x/term"
 )
 
-var VERSION string = "v0.2.7"
+var VERSION string = "v0.2.8"
 
 const ENV_VARS = "TERM"
 const TLS_KEY = "key.pem"
@@ -414,14 +415,32 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	}
 	envs_str = envs_str[:len(envs_str)-1]
 	envs := strings.Split(envs_str, "\n")
-	last_env_num := len(envs) - 1
 
 	is_alloc_pty := true
 	var stdin_channel net.Conn
 	var stderr_channel net.Conn
-	if envs[last_env_num] == "_NO_PTY_" {
+
+	check_envs := func(envs []string, str string, is_pfx bool) (bool, string) {
+		value := ""
+		found := false
+		var index int
+		for i, e := range envs {
+			if e == str || (is_pfx && strings.HasPrefix(e, str)) {
+				index = i
+				found = true
+			}
+		}
+		if found && is_pfx {
+			value = strings.Replace(envs[index], str, "", 1)
+		}
+		if found {
+			envs = slices.Delete(envs, index, index+1)
+		}
+		return found, value
+	}
+
+	if env_found, _ := check_envs(envs, "_NO_PTY_", false); env_found {
 		is_alloc_pty = false
-		envs = envs[:last_env_num]
 
 		stdin_channel, err = session.Accept()
 		if err != nil {
@@ -461,16 +480,10 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	cmd := strings.Split(cmd_str, "\n")
 	exec_cmd := exec.Command(cmd[0], cmd[1:]...)
 
-	var cwd string
-	last_env_num -= 1
 	exec_cmd_envs := os.Environ()
-	if strings.HasPrefix(envs[last_env_num], "_SSRV_CWD=") {
-		cwd = strings.Replace(envs[last_env_num], "_SSRV_CWD=", "", 1)
-		envs = envs[:last_env_num]
-		last_env_num -= 1
-	}
-	if strings.HasPrefix(envs[last_env_num], "_SSRV_UENV=") {
-		uenv_vars := strings.Replace(envs[last_env_num], "_SSRV_UENV=", "", 1)
+	_, cwd := check_envs(envs, "_SSRV_CWD=", true)
+	if env_found, env_value := check_envs(envs, "_SSRV_UENV=", true); env_found {
+		uenv_vars := env_value
 		if uenv_vars == "all" {
 			exec_cmd_envs = nil
 		} else if strings.HasPrefix(uenv_vars, "all-:") {
@@ -495,9 +508,8 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 				}
 			}
 		}
-		envs = envs[:last_env_num]
-		last_env_num -= 1
 	}
+
 	exec_cmd.Env = exec_cmd_envs
 	exec_cmd.Env = append(exec_cmd.Env, envs...)
 	if len(cwd) != 0 && is_dir_exists(cwd) {
