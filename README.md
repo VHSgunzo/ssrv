@@ -42,6 +42,8 @@ Accepted options:
         Change the current working directory of the process/command.
     -env string
         Comma separated list of environment variables to pass to the server side process. (default "TERM")
+    -env-pids string
+        Comma separated list of PIDs for get environment variables for pass to the server side process.
     -no-pty
         Do not allocate a pseudo-terminal for the server side process
     -nosep-cpids
@@ -64,6 +66,7 @@ Accepted options:
 Environment variables:
     SSRV_PTY=1                      Same as -pty argument
     SSRV_NO_PTY=1                   Same as -no-pty argument
+    SSRV_ENV_PIDS="123,456"         Same as -env-pids argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
     SSRV_UENV="MY_VAR,MY_VAR1"      Same as -uenv argument
     SSRV_SOCK="tcp:1337"            Same as -sock argument

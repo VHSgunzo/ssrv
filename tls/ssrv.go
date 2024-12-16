@@ -32,7 +32,7 @@ import (
 	"golang.org/x/term"
 )
 
-var VERSION string = "v0.2.9"
+var VERSION string = "v0.3.1"
 
 const ENV_VARS = "TERM"
 const TLS_KEY = "key.pem"
@@ -56,6 +56,7 @@ const USAGE_FOOTER = `
 Environment variables:
     SSRV_PTY=1                      Same as -pty argument
     SSRV_NO_PTY=1                   Same as -no-pty argument
+    SSRV_ENV_PIDS="123,456"         Same as -env-pids argument
     SSRV_ENV="MY_VAR,MY_VAR1"       Same as -env argument
     SSRV_UENV="MY_VAR,MY_VAR1"      Same as -uenv argument
     SSRV_SOCK="tcp:1337"            Same as -sock argument
@@ -87,6 +88,10 @@ var is_srv = flag.Bool(
 var socket_addr = flag.String(
 	"sock", UNIX_SOCKET,
 	"Socket address listen/connect (unix,tcp,tcp4,tcp6)",
+)
+var env_pids = flag.String(
+	"env-pids", "",
+	"Comma separated list of PIDs for get environment variables for pass to the server side process.",
 )
 var env_vars = flag.String(
 	"env", ENV_VARS,
@@ -265,6 +270,10 @@ func ssrv_env_vars_parse() {
 		!*nosep_cpids {
 		flag.Set("nosep-cpids", "true")
 	}
+	if ssrv_env_pids, ok := os.LookupEnv("SSRV_ENV_PIDS"); ok &&
+		*env_pids == "" {
+		flag.Set("env-pids", ssrv_env_pids)
+	}
 	if ssrv_env, ok := os.LookupEnv("SSRV_ENV"); ok &&
 		*env_vars == ENV_VARS {
 		flag.Set("env", ssrv_env)
@@ -329,6 +338,40 @@ func is_pid_exist(pid int) bool {
 	}
 	err = proc.Signal(syscall.SIGCONT)
 	return err == nil
+}
+
+func setenv_environ_pids(pids string) {
+	if len(pids) != 0 {
+		for _, pid := range strings.Split(pids, ",") {
+			environ, err := read_environ(pid)
+			if err != nil {
+				log.Fatalln(err)
+			}
+			for key, value := range environ {
+				os.Setenv(key, value)
+			}
+		}
+	}
+}
+
+func read_environ(pid string) (map[string]string, error) {
+	environ_path := fmt.Sprintf("/proc/%s/environ", pid)
+	data, err := os.ReadFile(environ_path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read environ file: %w", err)
+	}
+	environ := make(map[string]string)
+	pairs := strings.Split(string(data), "\000")
+	for _, pair := range pairs {
+		if pair == "" {
+			continue
+		}
+		parts := strings.SplitN(pair, "=", 2)
+		if len(parts) == 2 {
+			environ[parts[0]] = parts[1]
+		}
+	}
+	return environ, nil
 }
 
 func get_cert_sha256(cert string) ([]byte, error) {
@@ -414,7 +457,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		return
 	}
 	envs_str = envs_str[:len(envs_str)-1]
-	envs := strings.Split(envs_str, "%&&%")
+	envs := strings.Split(envs_str, "\000")
 
 	is_alloc_pty := true
 	var stdin_channel net.Conn
@@ -477,7 +520,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	if len(cmd_str) == 0 {
 		cmd_str = get_shell()
 	}
-	cmd := strings.Split(cmd_str, "%&&%")
+	cmd := strings.Split(cmd_str, "\000")
 	exec_cmd := exec.Command(cmd[0], cmd[1:]...)
 
 	exec_cmd_envs := os.Environ()
@@ -746,6 +789,8 @@ func server(proto, socket string) {
 		os.Exit(1)
 	}()
 
+	setenv_environ_pids(*env_pids)
+
 	if *env_vars == "all" {
 		for _, uenv := range strings.Split(*uenv_vars, ",") {
 			os.Unsetenv(uenv)
@@ -928,10 +973,12 @@ func client(proto, socket string, exec_args []string) int {
 		is_alloc_pty = false
 	}
 
+	setenv_environ_pids(*env_pids)
+
 	var envs string
 	if *env_vars == "all" {
 		for _, env := range os.Environ() {
-			envs += env + "%&&%"
+			envs += env + "\000"
 		}
 	} else if strings.HasPrefix(*env_vars, "all-:") {
 		unset_env_vars := strings.Split(strings.Replace(*env_vars, "all-:", "", 1), ",")
@@ -946,7 +993,7 @@ func client(proto, socket string, exec_args []string) int {
 				}
 			}
 			if is_add_env {
-				envs += env + "%&&%"
+				envs += env + "\000"
 			}
 		}
 	} else {
@@ -955,15 +1002,15 @@ func client(proto, socket string, exec_args []string) int {
 		}
 		for _, env := range strings.Split(*env_vars, ",") {
 			if value, ok := os.LookupEnv(env); ok {
-				envs += env + "=" + value + "%&&%"
+				envs += env + "=" + value + "\000"
 			}
 		}
 	}
 	if len(*uenv_vars) != 0 {
-		envs += fmt.Sprintf("_SSRV_UENV=%s", *uenv_vars) + "%&&%"
+		envs += fmt.Sprintf("_SSRV_UENV=%s", *uenv_vars) + "\000"
 	}
 	if len(*cwd) != 0 {
-		envs += fmt.Sprintf("_SSRV_CWD=%s", *cwd) + "%&&%"
+		envs += fmt.Sprintf("_SSRV_CWD=%s", *cwd) + "\000"
 	}
 	if !is_alloc_pty {
 		envs += "_NO_PTY_"
@@ -1000,7 +1047,7 @@ func client(proto, socket string, exec_args []string) int {
 	if err != nil {
 		log.Fatalf("command channel open error: %v", err)
 	}
-	command := strings.Join(exec_args, "%&&%") + "\r"
+	command := strings.Join(exec_args, "\000") + "\r"
 	_, err = command_channel.Write([]byte(command))
 	if err != nil {
 		log.Fatalf("failed to send command: %v", err)
