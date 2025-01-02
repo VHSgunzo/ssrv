@@ -29,7 +29,7 @@ import (
 	"golang.org/x/term"
 )
 
-var VERSION string = "v0.3.1"
+var VERSION string = "v0.3.2"
 
 const ENV_VARS = "TERM"
 const BINARY_NAME = "ssrv"
@@ -123,6 +123,9 @@ var cwd = flag.String(
 	"Change the current working directory of the process/command.",
 )
 
+var log_out = log.New(os.Stdout, "", log.LstdFlags)
+var log_err = log.New(os.Stderr, "", log.LstdFlags)
+
 type win_size struct {
 	ws_row    uint16
 	ws_col    uint16
@@ -208,6 +211,10 @@ func get_shell() string {
 		return fish
 	} else if bash, err := exec.LookPath("bash"); err == nil {
 		return bash
+	} else if dash, err := exec.LookPath("dash"); err == nil {
+		return dash
+	} else if ash, err := exec.LookPath("ash"); err == nil {
+		return ash
 	}
 	return "sh"
 }
@@ -322,7 +329,7 @@ func setenv_environ_pids(pids string) {
 		for _, pid := range strings.Split(pids, ",") {
 			environ, err := read_environ(pid)
 			if err != nil {
-				log.Fatalln(err)
+				log_err.Fatalln(err)
 			}
 			for key, value := range environ {
 				os.Setenv(key, value)
@@ -355,7 +362,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	var wg sync.WaitGroup
 	disconnect := func(session *yamux.Session, remote string) {
 		session.Close()
-		log.Printf("[%s] [  DISCONNECT  ]", remote)
+		log_out.Printf("[%s] [  DISCONNECT  ]", remote)
 	}
 
 	defer conn.Close()
@@ -363,21 +370,21 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 	session, err := yamux.Server(conn, nil)
 	if err != nil {
-		log.Printf("[%s] session error: %v", remote, err)
+		log_err.Printf("[%s] session error: %v", remote, err)
 		return
 	}
 	defer disconnect(session, remote)
-	log.Printf("[%s] [    CONNECT   ]", remote)
+	log_out.Printf("[%s] [    CONNECT   ]", remote)
 
 	envs_channel, err := session.Accept()
 	if err != nil {
-		log.Printf("[%s] environment channel accept error: %v", remote, err)
+		log_err.Printf("[%s] environment channel accept error: %v", remote, err)
 		return
 	}
 	envs_reader := bufio.NewReader(envs_channel)
 	envs_str, err := envs_reader.ReadString('\r')
 	if err != nil {
-		log.Printf("[%s] error reading environment variables: %v", remote, err)
+		log_err.Printf("[%s] error reading environment variables: %v", remote, err)
 		return
 	}
 	envs_str = envs_str[:len(envs_str)-1]
@@ -411,12 +418,12 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 		stdin_channel, err = session.Accept()
 		if err != nil {
-			log.Printf("[%s] stdin channel accept error: %v", remote, err)
+			log_err.Printf("[%s] stdin channel accept error: %v", remote, err)
 			return
 		}
 		stderr_channel, err = session.Accept()
 		if err != nil {
-			log.Printf("[%s] stderr channel accept error: %v", remote, err)
+			log_err.Printf("[%s] stderr channel accept error: %v", remote, err)
 			return
 		}
 	} else {
@@ -425,19 +432,19 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 	data_channel, err := session.Accept()
 	if err != nil {
-		log.Printf("[%s] data channel accept error: %v", remote, err)
+		log_err.Printf("[%s] data channel accept error: %v", remote, err)
 		return
 	}
 
 	command_channel, err := session.Accept()
 	if err != nil {
-		log.Printf("[%s] command channel accept error: %v", remote, err)
+		log_err.Printf("[%s] command channel accept error: %v", remote, err)
 		return
 	}
 	cmd_reader := bufio.NewReader(command_channel)
 	cmd_str, err := cmd_reader.ReadString('\r')
 	if err != nil {
-		log.Printf("[%s] error reading command: %v", remote, err)
+		log_err.Printf("[%s] error reading command: %v", remote, err)
 		return
 	}
 	cmd_str = cmd_str[:len(cmd_str)-1]
@@ -507,24 +514,24 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		err = exec_cmd.Start()
 	}
 	if err != nil {
-		log.Printf("[%s] cmd error: %v", remote, err)
+		log_err.Printf("[%s] cmd error: %v", remote, err)
 		_, err = command_channel.Write([]byte(fmt.Sprint("cmd error: " + err.Error() + "\r")))
 		if err != nil {
-			log.Printf("[%s] failed to send cmd error: %v", remote, err)
+			log_err.Printf("[%s] failed to send cmd error: %v", remote, err)
 		}
 		return
 	}
 
 	cmd_pid := exec_cmd.Process.Pid
 	cmd_pgid, _ := syscall.Getpgid(cmd_pid)
-	log.Printf("[%s] PID: %d -> EXEC: %s", remote, cmd_pid, cmd)
+	log_out.Printf("[%s] PID: %d -> EXEC: %s", remote, cmd_pid, cmd)
 
 	cpid := fmt.Sprint(self_cpids_dir, "/", cmd_pid)
 	if is_dir_exists(self_cpids_dir) {
 		proc_pid := fmt.Sprint("/proc/", cmd_pid)
 		if is_dir_exists(proc_pid) {
 			if err := os.Symlink(proc_pid, cpid); err != nil {
-				log.Printf("[%s] PID: %d -> symlink error: %v", remote, cmd_pid, err)
+				log_err.Printf("[%s] PID: %d -> symlink error: %v", remote, cmd_pid, err)
 				return
 			}
 		} else {
@@ -540,7 +547,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 	control_channel, err := session.Accept()
 	if err != nil {
-		log.Printf("[%s] PID: %d -> control channel accept error: %v", remote, cmd_pid, err)
+		log_err.Printf("[%s] PID: %d -> control channel accept error: %v", remote, cmd_pid, err)
 		return
 	}
 	if is_alloc_pty {
@@ -554,11 +561,11 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 					break
 				}
 				if err := set_term_size(cmd_ptmx, win.Rows, win.Cols); err != nil {
-					log.Printf("[%s] PID: %d -> set term size error: %v", remote, cmd_pid, err)
+					log_err.Printf("[%s] PID: %d -> set term size error: %v", remote, cmd_pid, err)
 					break
 				}
 				if err := syscall.Kill(exec_cmd.Process.Pid, syscall.SIGWINCH); err != nil {
-					log.Printf("[%s] PID: %d -> sigwinch error: %v", remote, cmd_pid, err)
+					log_err.Printf("[%s] PID: %d -> sigwinch error: %v", remote, cmd_pid, err)
 					break
 				}
 			}
@@ -596,7 +603,7 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 			reader := bufio.NewReader(control_channel)
 			sig, err := reader.ReadString('\r')
 			if err != nil && err != io.EOF {
-				log.Printf("[%s] PID: %d -> control channel reader error: %v", remote, cmd_pid, err)
+				log_err.Printf("[%s] PID: %d -> control channel reader error: %v", remote, cmd_pid, err)
 			}
 			switch sig {
 			case "SIGINT\r":
@@ -620,15 +627,15 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 
 	state, err := exec_cmd.Process.Wait()
 	if err != nil {
-		log.Printf("[%s] PID: %d -> error getting exit code: %v", remote, cmd_pid, err)
+		log_err.Printf("[%s] PID: %d -> error getting exit code: %v", remote, cmd_pid, err)
 		return
 	}
 	exit_code := strconv.Itoa(state.ExitCode())
-	log.Printf("[%s] PID: %d -> EXIT: %s", remote, cmd_pid, exit_code)
+	log_out.Printf("[%s] PID: %d -> EXIT: %s", remote, cmd_pid, exit_code)
 
 	_, err = command_channel.Write([]byte(fmt.Sprint(exit_code + "\r")))
 	if err != nil {
-		log.Printf("[%s] PID: %d -> error sending exit code: %v", remote, cmd_pid, err)
+		log_err.Printf("[%s] PID: %d -> error sending exit code: %v", remote, cmd_pid, err)
 		return
 	}
 
@@ -644,23 +651,23 @@ func server(proto, socket string) {
 	if *pid_file != "" {
 		err := os.WriteFile(*pid_file, []byte(ssrv_pid), 0644)
 		if err != nil {
-			log.Fatalf("error writing PID file: %v\n", err)
+			log_err.Fatalf("error writing PID file: %v\n", err)
 		}
 	}
 
 	listener, err := net.Listen(proto, socket)
 	if err != nil {
-		log.Fatal(err)
+		log_err.Fatal(err)
 	}
 
 	if proto == "unix" && is_file_exists(socket) {
 		err = os.Chmod(socket, 0700)
 		if err != nil {
-			log.Fatalln("unix socket:", err)
+			log_err.Fatalln("unix socket:", err)
 		}
 	}
 	listener_addr := listener.Addr().String()
-	log.Printf("listening on %s %s", listener.Addr().Network(), listener_addr)
+	log_out.Printf("listening on %s %s", listener.Addr().Network(), listener_addr)
 
 	var self_cpids_dir string
 	if *nosep_cpids {
@@ -759,14 +766,14 @@ func server(proto, socket string) {
 	if len(*cwd) != 0 {
 		err := os.Chdir(*cwd)
 		if err != nil {
-			log.Fatalf("cwd path error: %v\n", err)
+			log_err.Fatalf("cwd path error: %v\n", err)
 		}
 	}
 
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
-			log.Printf("[%s] accept error: %v", conn.RemoteAddr().String(), err)
+			log_err.Printf("[%s] accept error: %v", conn.RemoteAddr().String(), err)
 			continue
 		}
 		go srv_handle(conn, self_cpids_dir)
@@ -788,7 +795,7 @@ func client(proto, socket string, exec_args []string) int {
 
 	conn, err := net.Dial(proto, socket)
 	if err != nil {
-		log.Fatalf("connection error: %v", err)
+		log_err.Fatalf("connection error: %v", err)
 	}
 	defer conn.Close()
 
@@ -796,13 +803,13 @@ func client(proto, socket string, exec_args []string) int {
 	yamux_config.StreamOpenTimeout = 0
 	session, err := yamux.Client(conn, yamux_config)
 	if err != nil {
-		log.Fatalf("session error: %v", err)
+		log_err.Fatalf("session error: %v", err)
 	}
 	defer session.Close()
 
 	_, err = session.Ping()
 	if err != nil {
-		log.Fatalf("ping error: %v", err)
+		log_err.Fatalf("ping error: %v", err)
 	}
 
 	stdin := int(os.Stdin.Fd())
@@ -824,7 +831,7 @@ func client(proto, socket string, exec_args []string) int {
 	pid := os.Getpid()
 	pgid, err := unix.Getpgid(pid)
 	if err != nil {
-		log.Fatalf("error getting process group ID: %v", err)
+		log_err.Fatalf("error getting process group ID: %v", err)
 	}
 	is_foreground := true
 	tpgid, err := unix.IoctlGetInt(unix.Stdin, unix.TIOCGPGRP)
@@ -839,7 +846,7 @@ func client(proto, socket string, exec_args []string) int {
 			is_foreground = true
 			term_old_state, err = term.MakeRaw(stdin)
 			if err != nil {
-				log.Fatalf("unable to make terminal raw: %v", err)
+				log_err.Fatalf("unable to make terminal raw: %v", err)
 			}
 			defer term.Restore(stdin, term_old_state)
 		}
@@ -892,11 +899,11 @@ func client(proto, socket string, exec_args []string) int {
 	envs += "\r"
 	envs_channel, err := session.Open()
 	if err != nil {
-		log.Fatalf("environment channel open error: %v", err)
+		log_err.Fatalf("environment channel open error: %v", err)
 	}
 	_, err = envs_channel.Write([]byte(envs))
 	if err != nil {
-		log.Fatalf("failed to send environment variables: %v", err)
+		log_err.Fatalf("failed to send environment variables: %v", err)
 	}
 
 	var stdin_channel net.Conn
@@ -904,27 +911,27 @@ func client(proto, socket string, exec_args []string) int {
 	if !is_alloc_pty {
 		stdin_channel, err = session.Open()
 		if err != nil {
-			log.Fatalf("stdin channel open error: %v", err)
+			log_err.Fatalf("stdin channel open error: %v", err)
 		}
 		stderr_channel, err = session.Open()
 		if err != nil {
-			log.Fatalf("stderr channel open error: %v", err)
+			log_err.Fatalf("stderr channel open error: %v", err)
 		}
 	}
 
 	data_channel, err := session.Open()
 	if err != nil {
-		log.Fatalf("data channel open error: %v", err)
+		log_err.Fatalf("data channel open error: %v", err)
 	}
 
 	command_channel, err := session.Open()
 	if err != nil {
-		log.Fatalf("command channel open error: %v", err)
+		log_err.Fatalf("command channel open error: %v", err)
 	}
 	command := strings.Join(exec_args, "\000") + "\r"
 	_, err = command_channel.Write([]byte(command))
 	if err != nil {
-		log.Fatalf("failed to send command: %v", err)
+		log_err.Fatalf("failed to send command: %v", err)
 	}
 
 	pipe_stdin := func(dst io.Writer, src io.Reader) {
@@ -939,7 +946,7 @@ func client(proto, socket string, exec_args []string) int {
 
 	control_channel, err := session.Open()
 	if err != nil {
-		log.Fatalf("control channel open error: %v", err)
+		log_err.Fatalf("control channel open error: %v", err)
 	}
 	if is_alloc_pty {
 		go func() {
@@ -949,7 +956,7 @@ func client(proto, socket string, exec_args []string) int {
 			for {
 				cols, rows, err := term.GetSize(stdin)
 				if err != nil {
-					log.Printf("get term size error: %v", err)
+					log_err.Printf("get term size error: %v", err)
 					break
 				}
 				win := struct {
@@ -1007,14 +1014,14 @@ func client(proto, socket string, exec_args []string) int {
 	exit_reader := bufio.NewReader(command_channel)
 	exit_code_str, err := exit_reader.ReadString('\r')
 	if strings.Contains(exit_code_str, "cmd error:") {
-		log.Println(exit_code_str)
+		log_err.Println(exit_code_str)
 	} else if err == nil {
 		exit_code, err = strconv.Atoi(exit_code_str[:len(exit_code_str)-1])
 		if err != nil {
-			log.Printf("failed to parse exit code: %v", err)
+			log_err.Printf("failed to parse exit code: %v", err)
 		}
 	} else if err != io.EOF {
-		log.Printf("error reading from command channel: %v", err)
+		log_err.Printf("error reading from command channel: %v", err)
 	}
 
 	if term_old_state != nil {
@@ -1059,6 +1066,6 @@ func main() {
 			os.Exit(client(proto, socket, exec_args))
 		}
 	} else {
-		log.Fatal("socket format is not recognized!")
+		log_err.Fatal("socket format is not recognized!")
 	}
 }
