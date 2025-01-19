@@ -1,16 +1,16 @@
 module github.com/VHSgunzo/ssrv
 
-go 1.23.4
+go 1.23.5
 
 require (
 	github.com/creack/pty v1.1.24
 	github.com/hashicorp/yamux v0.1.2
-	golang.org/x/term v0.27.0
+	golang.org/x/term v0.28.0
 )
 
 require (
 	github.com/shirou/gopsutil/v3 v3.24.5
-	golang.org/x/sys v0.28.0
+	golang.org/x/sys v0.29.0
 )
 
 require (

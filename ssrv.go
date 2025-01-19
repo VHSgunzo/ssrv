@@ -29,7 +29,7 @@ import (
 	"golang.org/x/term"
 )
 
-var VERSION string = "v0.3.2"
+var VERSION string = "v0.3.3"
 
 const ENV_VARS = "TERM"
 const BINARY_NAME = "ssrv"
@@ -359,7 +359,6 @@ func read_environ(pid string) (map[string]string, error) {
 }
 
 func srv_handle(conn net.Conn, self_cpids_dir string) {
-	var wg sync.WaitGroup
 	disconnect := func(session *yamux.Session, remote string) {
 		session.Close()
 		log_out.Printf("[%s] [  DISCONNECT  ]", remote)
@@ -502,6 +501,9 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		}
 	}
 
+	done_stdout := make(chan struct{})
+	done_stderr := make(chan struct{})
+
 	var cmd_ptmx *os.File
 	var cmd_stdout, cmd_stderr io.ReadCloser
 	if is_alloc_pty {
@@ -541,7 +543,6 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 	defer os.Remove(cpid)
 
 	cp := func(dst io.Writer, src io.Reader) {
-		defer wg.Done()
 		io.Copy(dst, src)
 	}
 
@@ -551,6 +552,8 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		return
 	}
 	if is_alloc_pty {
+		close(done_stdout)
+		close(done_stderr)
 		go func() {
 			decoder := gob.NewDecoder(control_channel)
 			for {
@@ -570,7 +573,6 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 				}
 			}
 		}()
-		wg.Add(2)
 		go cp(data_channel, cmd_ptmx)
 		go cp(cmd_ptmx, data_channel)
 	} else {
@@ -620,9 +622,14 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 				exec_cmd_kill(syscall.SIGUSR2)
 			}
 		}()
-		wg.Add(2)
-		go cp(data_channel, cmd_stdout)
-		go cp(stderr_channel, cmd_stderr)
+		go func() {
+			cp(data_channel, cmd_stdout)
+			close(done_stdout)
+		}()
+		go func() {
+			cp(stderr_channel, cmd_stderr)
+			close(done_stderr)
+		}()
 	}
 
 	state, err := exec_cmd.Process.Wait()
@@ -639,11 +646,15 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 		return
 	}
 
+	<-done_stdout
+	<-done_stderr
+
 	if is_alloc_pty {
 		session.Close()
+	} else {
+		data_channel.Close()
+		stderr_channel.Close()
 	}
-
-	wg.Wait()
 }
 
 func server(proto, socket string) {
@@ -781,8 +792,6 @@ func server(proto, socket string) {
 }
 
 func client(proto, socket string, exec_args []string) int {
-	var wg sync.WaitGroup
-
 	is_alloc_pty := true
 	if len(exec_args) != 0 {
 		is_alloc_pty = !pty_blocklist[exec_args[0]]
@@ -935,12 +944,10 @@ func client(proto, socket string, exec_args []string) int {
 	}
 
 	pipe_stdin := func(dst io.Writer, src io.Reader) {
-		defer wg.Done()
 		io.Copy(dst, src)
 		stdin_channel.Close()
 	}
 	cp := func(dst io.Writer, src io.Reader) {
-		defer wg.Done()
 		io.Copy(dst, src)
 	}
 
@@ -994,21 +1001,26 @@ func client(proto, socket string, exec_args []string) int {
 		}()
 	}
 
+	done_stdout := make(chan struct{})
+	done_stderr := make(chan struct{})
+
 	if is_foreground {
-		if !is_stdin_term {
-			wg.Add(1)
-			go pipe_stdin(stdin_channel, os.Stdin)
-		} else {
-			wg.Add(1)
+		if is_stdin_term {
 			go cp(data_channel, os.Stdin)
+		} else {
+			go pipe_stdin(stdin_channel, os.Stdin)
 		}
 	}
 	if !is_alloc_pty {
-		wg.Add(1)
-		go cp(os.Stderr, stderr_channel)
+		go func() {
+			cp(os.Stderr, stderr_channel)
+			close(done_stderr)
+		}()
 	}
-	wg.Add(1)
-	go cp(os.Stdout, data_channel)
+	go func() {
+		cp(os.Stdout, data_channel)
+		close(done_stdout)
+	}()
 
 	var exit_code = 1
 	exit_reader := bufio.NewReader(command_channel)
@@ -1026,18 +1038,13 @@ func client(proto, socket string, exec_args []string) int {
 
 	if term_old_state != nil {
 		term.Restore(stdin, term_old_state)
-		if is_foreground {
-			wg.Done()
-		}
-	}
-	if is_foreground && is_stdin_term && ((!*is_pty && !*is_no_pty) ||
-		(*is_no_pty && (!is_stdout_term || !is_stderr_term)) || *is_no_pty) {
-		if !is_stderr_term || !is_alloc_pty {
-			wg.Done()
-		}
 	}
 
-	wg.Wait()
+	<-done_stdout
+	if !is_alloc_pty {
+		<-done_stderr
+	}
+
 	return exit_code
 }
 
