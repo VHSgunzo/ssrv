@@ -32,7 +32,7 @@ import (
 	"golang.org/x/term"
 )
 
-var VERSION string = "v0.3.3"
+var VERSION string = "v0.3.4"
 
 const ENV_VARS = "TERM"
 const TLS_KEY = "key.pem"
@@ -355,7 +355,9 @@ func setenv_environ_pids(pids string) {
 				log_err.Fatalln(err)
 			}
 			for key, value := range environ {
-				os.Setenv(key, value)
+				if !strings.HasPrefix(key, "SSRV_") {
+					os.Setenv(key, value)
+				}
 			}
 		}
 	}
@@ -540,8 +542,11 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 			no_uenv_vars := strings.Split(strings.Replace(uenv_vars, "all-:", "", 1), ",")
 			for _, env := range exec_cmd_envs {
 				pair := strings.SplitN(env, "=", 2)
+				key := pair[0]
 				for _, no_uenv := range no_uenv_vars {
-					if pair[0] == no_uenv {
+					if (strings.HasSuffix(no_uenv, "*") &&
+						strings.HasPrefix(key, strings.Replace(no_uenv, "*", "", 1))) ||
+						key == no_uenv {
 						exec_cmd_no_uenv = append(exec_cmd_no_uenv, env)
 					}
 				}
@@ -551,7 +556,10 @@ func srv_handle(conn net.Conn, self_cpids_dir string) {
 			for _, uenv := range strings.Split(uenv_vars, ",") {
 				for num, env := range exec_cmd_envs {
 					pair := strings.SplitN(env, "=", 2)
-					if pair[0] == uenv {
+					key := pair[0]
+					if (strings.HasSuffix(uenv, "*") &&
+						strings.HasPrefix(key, strings.Replace(uenv, "*", "", 1))) ||
+						key == uenv {
 						exec_cmd_envs = append(exec_cmd_envs[:num], exec_cmd_envs[num+1:]...)
 					}
 				}
@@ -815,7 +823,17 @@ func server(proto, socket string) {
 		}
 	} else if strings.HasPrefix(*env_vars, "all-:") {
 		for _, uenv := range strings.Split(strings.Replace(*env_vars, "all-:", "", 1), ",") {
-			os.Unsetenv(uenv)
+			if strings.HasSuffix(uenv, "*") {
+				for _, env := range os.Environ() {
+					pair := strings.SplitN(env, "=", 2)
+					key := pair[0]
+					if strings.HasPrefix(key, strings.Replace(uenv, "*", "", 1)) {
+						os.Unsetenv(key)
+					}
+				}
+			} else {
+				os.Unsetenv(uenv)
+			}
 		}
 	} else if strings.HasPrefix(*uenv_vars, "all-:") {
 		no_uenv_vars := strings.Split(strings.Replace(*uenv_vars, "all-:", "", 1), ",")
@@ -824,7 +842,9 @@ func server(proto, socket string) {
 			key := pair[0]
 			is_unset_env := true
 			for _, no_uenv := range no_uenv_vars {
-				if key == no_uenv {
+				if (strings.HasSuffix(no_uenv, "*") &&
+					strings.HasPrefix(key, strings.Replace(no_uenv, "*", "", 1))) ||
+					key == no_uenv {
 					is_unset_env = false
 					break
 				}
@@ -852,14 +872,18 @@ func server(proto, socket string) {
 				)
 			}
 			for _, env_pass := range env_vars_pass {
-				if key == env_pass {
+				if (strings.HasSuffix(env_pass, "*") &&
+					strings.HasPrefix(key, strings.Replace(env_pass, "*", "", 1))) ||
+					key == env_pass {
 					is_unset_env = false
 					break
 				}
 			}
 			if *uenv_vars != "all" && !is_unset_env {
 				for _, uenv_pass := range uenv_vars_pass {
-					if key == uenv_pass {
+					if (strings.HasSuffix(uenv_pass, "*") &&
+						strings.HasPrefix(key, strings.Replace(uenv_pass, "*", "", 1))) ||
+						key == uenv_pass {
 						is_unset_env = true
 						break
 					}
@@ -1004,7 +1028,9 @@ func client(proto, socket string, exec_args []string) int {
 			key := pair[0]
 			is_add_env := true
 			for _, unset_env := range unset_env_vars {
-				if key == unset_env {
+				if (strings.HasSuffix(unset_env, "*") &&
+					strings.HasPrefix(key, strings.Replace(unset_env, "*", "", 1))) ||
+					key == unset_env {
 					is_add_env = false
 					break
 				}
